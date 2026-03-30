@@ -1,26 +1,29 @@
 import React, { useEffect, useState } from "react";
-import { DollarSign, CreditCard, TrendingUp, Receipt } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle, StatCard, Badge, formatCurrency } from "@milly-maker/ui";
+import { DollarSign, CreditCard, TrendingUp, Landmark } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle, StatCard, formatCurrency } from "@milly-maker/ui";
 import { useDebts } from "@/db/hooks/useDebts.js";
 import { useInvestments } from "@/db/hooks/useInvestments.js";
 import { useDb } from "@/db/hooks/useDb.js";
 import { getNetWorthHistory } from "@/db/queries/investments.js";
-import { getMonthlyTotals } from "@/db/queries/expenses.js";
+import { getCheckingBalanceSummary } from "@/db/queries/checking.js";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  CartesianGrid, PieChart, Pie, Cell, Legend,
+  CartesianGrid, BarChart, Bar, Cell,
 } from "recharts";
 
-const CHART_COLORS = ["#6366f1", "#22c55e", "#f59e0b", "#3b82f6", "#ec4899", "#14b8a6", "#f97316", "#94a3b8"];
+const CHART_COLORS = ["#6366f1", "#22c55e", "#f59e0b", "#3b82f6", "#ec4899", "#14b8a6"];
 
 export function DashboardPage() {
   const { conn } = useDb();
   const { totalDebt, totalMinPayment } = useDebts();
   const { totalValue, totalMonthlyContribution } = useInvestments();
   const [netWorthHistory, setNetWorthHistory] = useState<{ snapshot_date: string; net_worth: number }[]>([]);
-  const [spendingByCategory, setSpendingByCategory] = useState<{ name: string; value: number; color: string }[]>([]);
+  const [checkingAccounts, setCheckingAccounts] = useState<
+    { account_id: string; account_name: string; current_balance: number }[]
+  >([]);
 
   const netWorth = totalValue - totalDebt;
+  const totalChecking = checkingAccounts.reduce((s, a) => s + a.current_balance, 0);
 
   useEffect(() => {
     if (!conn) return;
@@ -31,24 +34,8 @@ export function DashboardPage() {
 
   useEffect(() => {
     if (!conn) return;
-    const now = new Date();
-    void getMonthlyTotals(conn).then((data) => {
-      const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-      const thisMonth = data.filter((d) => d.month === currentMonth);
-      // Merge by category_name
-      const map = new Map<string, number>();
-      for (const row of thisMonth) {
-        map.set(row.category_name, (map.get(row.category_name) ?? 0) + row.total);
-      }
-      setSpendingByCategory(
-        Array.from(map.entries())
-          .sort((a, b) => b[1] - a[1])
-          .map(([name, value], i) => ({ name, value, color: CHART_COLORS[i % CHART_COLORS.length]! }))
-      );
-    });
+    void getCheckingBalanceSummary(conn).then(setCheckingAccounts);
   }, [conn]);
-
-  const totalMonthlySpend = spendingByCategory.reduce((s, c) => s + c.value, 0);
 
   return (
     <div className="flex flex-col gap-6">
@@ -64,6 +51,13 @@ export function DashboardPage() {
           accentColor={netWorth >= 0 ? "var(--color-success)" : "var(--color-danger)"}
         />
         <StatCard
+          label="Checking Balance"
+          value={formatCurrency(totalChecking, true)}
+          subValue={`${checkingAccounts.length} account${checkingAccounts.length !== 1 ? "s" : ""}`}
+          icon={<Landmark size={16} />}
+          accentColor="var(--color-chart-3)"
+        />
+        <StatCard
           label="Total Investments"
           value={formatCurrency(totalValue, true)}
           subValue={`+${formatCurrency(totalMonthlyContribution)}/mo`}
@@ -76,12 +70,6 @@ export function DashboardPage() {
           subValue={`${formatCurrency(totalMinPayment)}/mo min`}
           icon={<CreditCard size={16} />}
           accentColor="var(--color-danger)"
-        />
-        <StatCard
-          label="Spent This Month"
-          value={formatCurrency(totalMonthlySpend, true)}
-          icon={<Receipt size={16} />}
-          accentColor="var(--color-warning)"
         />
       </div>
 
@@ -114,49 +102,52 @@ export function DashboardPage() {
           </CardContent>
         </Card>
 
-        {/* Spending breakdown */}
+        {/* Checking account balances */}
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle>Spending This Month</CardTitle>
-              <Badge variant="muted">{formatCurrency(totalMonthlySpend)}</Badge>
-            </div>
+            <CardTitle>Checking Accounts</CardTitle>
           </CardHeader>
           <CardContent>
-            {spendingByCategory.length === 0 ? (
+            {checkingAccounts.length === 0 ? (
               <div className="flex h-40 items-center justify-center text-sm text-[var(--color-text-muted)]">
-                No expenses recorded this month yet.
+                No checking accounts set up yet. Head to Checking to add one.
               </div>
-            ) : (
-              <div className="flex gap-4">
-                <ResponsiveContainer width="50%" height={160}>
-                  <PieChart>
-                    <Pie data={spendingByCategory} dataKey="value" cx="50%" cy="50%" outerRadius={65} innerRadius={35}>
-                      {spendingByCategory.map((entry, i) => (
-                        <Cell key={i} fill={entry.color} />
-                      ))}
-                    </Pie>
-                    <Tooltip formatter={(v: number) => formatCurrency(v)} contentStyle={{ backgroundColor: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "8px", fontSize: "12px" }} />
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="flex flex-1 flex-col justify-center gap-1.5">
-                  {spendingByCategory.slice(0, 6).map((c) => (
-                    <div key={c.name} className="flex items-center justify-between text-xs">
-                      <span className="flex items-center gap-1.5">
-                        <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: c.color }} />
-                        <span className="truncate">{c.name}</span>
-                      </span>
-                      <span className="ml-2 shrink-0 text-[var(--color-text-muted)]">{formatCurrency(c.value)}</span>
-                    </div>
-                  ))}
+            ) : checkingAccounts.length === 1 ? (
+              <div className="flex h-40 items-center justify-center">
+                <div className="text-center">
+                  <p className="text-xs text-[var(--color-text-muted)] mb-1">{checkingAccounts[0]!.account_name}</p>
+                  <p className={`text-3xl font-bold ${checkingAccounts[0]!.current_balance < 0 ? "text-[var(--color-danger)]" : ""}`}>
+                    {formatCurrency(checkingAccounts[0]!.current_balance)}
+                  </p>
                 </div>
               </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart
+                  data={checkingAccounts.map((a, i) => ({
+                    name: a.account_name,
+                    balance: a.current_balance,
+                    color: CHART_COLORS[i % CHART_COLORS.length]!,
+                  }))}
+                  margin={{ top: 4, right: 8, left: 0, bottom: 0 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-subtle)" />
+                  <XAxis dataKey="name" tick={{ fontSize: 11, fill: "var(--color-text-subtle)" }} />
+                  <YAxis tickFormatter={(v: number) => `$${(v / 1000).toFixed(1)}k`} tick={{ fontSize: 11, fill: "var(--color-text-subtle)" }} />
+                  <Tooltip formatter={(v: number) => formatCurrency(v)} contentStyle={{ backgroundColor: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "8px", fontSize: "12px" }} />
+                  <Bar dataKey="balance" name="Balance" radius={[4, 4, 0, 0]}>
+                    {checkingAccounts.map((_, i) => (
+                      <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
             )}
           </CardContent>
         </Card>
       </div>
 
-      {/* Quick tips */}
+      {/* Quick tip */}
       <Card>
         <CardHeader><CardTitle>Quick Actions</CardTitle></CardHeader>
         <CardContent>

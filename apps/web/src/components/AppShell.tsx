@@ -2,10 +2,11 @@ import React from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
   LayoutDashboard,
-  Receipt,
+  Landmark,
   CreditCard,
   TrendingUp,
   BarChart3,
+  BookOpen,
   Settings,
   MessageSquare,
   ChevronLeft,
@@ -16,11 +17,12 @@ import { useUIStore } from "@/store/ui.store.js";
 import { AssistantPanel } from "@/features/assistant/AssistantPanel.js";
 
 const NAV_ITEMS = [
-  { to: "/",           label: "Dashboard",   icon: LayoutDashboard },
-  { to: "/expenses",   label: "Expenses",    icon: Receipt },
-  { to: "/debts",      label: "Debts",       icon: CreditCard },
-  { to: "/investments",label: "Investments", icon: TrendingUp },
-  { to: "/forecast",   label: "Forecast",    icon: BarChart3 },
+  { to: "/",            label: "Dashboard",   icon: LayoutDashboard },
+  { to: "/checking",    label: "Checking",    icon: Landmark },
+  { to: "/debts",       label: "Debts",       icon: CreditCard },
+  { to: "/investments", label: "Investments", icon: TrendingUp },
+  { to: "/forecast",    label: "Forecast",    icon: BarChart3 },
+  { to: "/planning",    label: "Planning",    icon: BookOpen },
 ];
 
 interface AppShellProps {

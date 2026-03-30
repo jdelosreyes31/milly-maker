@@ -7,10 +7,11 @@ import {
 import { DbProvider } from "@/db/hooks/useDb.js";
 import { AppShell } from "@/components/AppShell.js";
 import { DashboardPage } from "@/features/dashboard/DashboardPage.js";
-import { ExpensesPage } from "@/features/expenses/ExpensesPage.js";
+import { CheckingPage } from "@/features/checking/CheckingPage.js";
 import { DebtsPage } from "@/features/debts/DebtsPage.js";
 import { InvestmentsPage } from "@/features/investments/InvestmentsPage.js";
 import { ForecastPage } from "@/features/forecast/ForecastPage.js";
+import { PlanningPage } from "@/features/planning/PlanningPage.js";
 import { SettingsPage } from "@/features/settings/SettingsPage.js";
 
 const rootRoute = createRootRoute({
@@ -24,18 +25,20 @@ const rootRoute = createRootRoute({
 });
 
 const dashboardRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: DashboardPage });
-const expensesRoute  = createRoute({ getParentRoute: () => rootRoute, path: "/expenses", component: ExpensesPage });
+const checkingRoute  = createRoute({ getParentRoute: () => rootRoute, path: "/checking", component: CheckingPage });
 const debtsRoute     = createRoute({ getParentRoute: () => rootRoute, path: "/debts", component: DebtsPage });
 const investmentsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/investments", component: InvestmentsPage });
 const forecastRoute  = createRoute({ getParentRoute: () => rootRoute, path: "/forecast", component: ForecastPage });
+const planningRoute  = createRoute({ getParentRoute: () => rootRoute, path: "/planning", component: PlanningPage });
 const settingsRoute  = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: SettingsPage });
 
 const routeTree = rootRoute.addChildren([
   dashboardRoute,
-  expensesRoute,
+  checkingRoute,
   debtsRoute,
   investmentsRoute,
   forecastRoute,
+  planningRoute,
   settingsRoute,
 ]);
 

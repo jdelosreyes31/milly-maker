@@ -4,7 +4,7 @@ import type { AsyncDuckDBConnection } from "@duckdb/duckdb-wasm";
 import { useDb } from "@/db/hooks/useDb.js";
 import { getAllDebts } from "@/db/queries/debts.js";
 import { getAllInvestments } from "@/db/queries/investments.js";
-import { getMonthlyTotals } from "@/db/queries/expenses.js";
+import { getCheckingBalanceSummary, getTransactionsForAccount } from "@/db/queries/checking.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -12,29 +12,23 @@ export interface Message {
 }
 
 async function buildFinancialContext(conn: AsyncDuckDBConnection): Promise<string> {
-  const [debts, investments, monthlyTotals] = await Promise.all([
+  const [debts, investments, checkingBalances, allTransactions] = await Promise.all([
     getAllDebts(conn),
     getAllInvestments(conn),
-    getMonthlyTotals(conn),
+    getCheckingBalanceSummary(conn),
+    getTransactionsForAccount(conn, "ALL"),
   ]);
-
-  const now = new Date();
-  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const lastMonth = (() => {
-    const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-  })();
-
-  const thisMonthSpend = monthlyTotals
-    .filter((r) => r.month === currentMonth)
-    .reduce((s, r) => s + r.total, 0);
-  const lastMonthSpend = monthlyTotals
-    .filter((r) => r.month === lastMonth)
-    .reduce((s, r) => s + r.total, 0);
 
   const totalDebt = debts.reduce((s, d) => s + d.current_balance, 0);
   const totalInvestments = investments.reduce((s, i) => s + i.current_value, 0);
-  const netWorth = totalInvestments - totalDebt;
+  const totalChecking = checkingBalances.reduce((s, a) => s + a.current_balance, 0);
+  const netWorth = totalInvestments + totalChecking - totalDebt;
+
+  // Recent debits (last 10)
+  const recentDebits = [...allTransactions]
+    .filter((t) => t.type === "debit")
+    .sort((a, b) => b.transaction_date.localeCompare(a.transaction_date))
+    .slice(0, 10);
 
   const debtLines = debts
     .map((d) => `  - ${d.name}: $${d.current_balance.toFixed(2)} @ ${(d.interest_rate * 100).toFixed(2)}% APR, min $${d.minimum_payment}/mo`)
@@ -44,11 +38,12 @@ async function buildFinancialContext(conn: AsyncDuckDBConnection): Promise<strin
     .map((i) => `  - ${i.name} (${i.account_type}): $${i.current_value.toFixed(2)}, contributing $${i.monthly_contribution}/mo`)
     .join("\n");
 
-  const topSpend = monthlyTotals
-    .filter((r) => r.month === currentMonth)
-    .sort((a, b) => b.total - a.total)
-    .slice(0, 5)
-    .map((r) => `  - ${r.category_name}: $${r.total.toFixed(2)}`)
+  const checkingLines = checkingBalances
+    .map((a) => `  - ${a.account_name}: $${a.current_balance.toFixed(2)}`)
+    .join("\n");
+
+  const recentDebitLines = recentDebits
+    .map((t) => `  - ${t.transaction_date} | ${t.description}: -$${t.amount.toFixed(2)} (${t.account_name})`)
     .join("\n");
 
   return `## User's Current Financial Snapshot
@@ -56,17 +51,19 @@ async function buildFinancialContext(conn: AsyncDuckDBConnection): Promise<strin
 **Net Worth:** $${netWorth.toFixed(2)}
 **Total Debt:** $${totalDebt.toFixed(2)}
 **Total Investments:** $${totalInvestments.toFixed(2)}
+**Checking Balance:** $${totalChecking.toFixed(2)}
+
+**Checking Accounts:**
+${checkingLines || "  None set up."}
+
+**Recent Debits:**
+${recentDebitLines || "  No transactions recorded."}
 
 **Debts:**
 ${debtLines || "  None tracked."}
 
 **Investments:**
 ${investmentLines || "  None tracked."}
-
-**Spending This Month ($${thisMonthSpend.toFixed(2)}):**
-${topSpend || "  No expenses recorded this month."}
-
-**Last Month Total Spend:** $${lastMonthSpend.toFixed(2)}
 `;
 }
 

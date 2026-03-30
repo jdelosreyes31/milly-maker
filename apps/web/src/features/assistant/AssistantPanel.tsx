@@ -6,7 +6,7 @@ import { useAssistant } from "./useAssistant.js";
 import { Link } from "@tanstack/react-router";
 
 export function AssistantPanel() {
-  const { toggleAssistant } = useUIStore();
+  const { toggleAssistant, pendingAssistantMessage, setPendingAssistantMessage } = useUIStore();
   const { messages, streaming, error, sendMessage, clearHistory } = useAssistant();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -16,6 +16,15 @@ export function AssistantPanel() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Auto-fire any message queued from another page (e.g. Planning's "Review with Claude")
+  useEffect(() => {
+    if (pendingAssistantMessage && hasApiKey && !streaming) {
+      const msg = pendingAssistantMessage;
+      setPendingAssistantMessage(null);
+      void sendMessage(msg);
+    }
+  }, [pendingAssistantMessage, hasApiKey, streaming, sendMessage, setPendingAssistantMessage]);
 
   async function handleSend() {
     const text = input.trim();
