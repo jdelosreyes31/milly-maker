@@ -1,0 +1,4 @@
+{
+  "extends": "@milly-maker/typescript-config/react.json",
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}
