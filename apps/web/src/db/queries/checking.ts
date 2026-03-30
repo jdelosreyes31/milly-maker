@@ -174,7 +174,8 @@ export async function insertTransaction(
     amount: number;
     description: string;
     transaction_date: string;
-    transfer_to_account_id?: string;
+    transfer_to_account_id?: string;         // destination is a checking account
+    transfer_to_savings_account_id?: string; // destination is a savings account
     notes?: string;
   }
 ): Promise<void> {
@@ -197,7 +198,7 @@ export async function insertTransaction(
     )
   `);
 
-  // For transfers: auto-create the paired credit on the destination account
+  // Transfer to another checking account: create paired credit there
   if (data.type === "transfer" && data.transfer_to_account_id) {
     const creditId = nanoid();
     await conn.query(`
@@ -216,6 +217,25 @@ export async function insertTransaction(
       )
     `);
   }
+
+  // Transfer to a savings account: create a transfer_in record there
+  if (data.type === "transfer" && data.transfer_to_savings_account_id) {
+    const depositId = nanoid();
+    await conn.query(`
+      INSERT INTO savings_transactions
+        (id, account_id, type, amount, description, transaction_date, transfer_pair_id, notes)
+      VALUES (
+        '${depositId}',
+        '${data.transfer_to_savings_account_id}',
+        'transfer_in',
+        ${data.amount},
+        '${esc(`Transfer from checking: ${data.description}`)}',
+        '${data.transaction_date}',
+        '${pairId}',
+        ${data.notes ? `'${esc(data.notes)}'` : "NULL"}
+      )
+    `);
+  }
 }
 
 export async function deleteTransaction(
@@ -224,8 +244,9 @@ export async function deleteTransaction(
   transferPairId: string | null
 ): Promise<void> {
   if (transferPairId) {
-    // Delete both legs of the transfer
+    // Delete both legs — handles checking↔checking and checking↔savings transfers
     await conn.query(`DELETE FROM checking_transactions WHERE transfer_pair_id = '${transferPairId}'`);
+    await conn.query(`DELETE FROM savings_transactions WHERE transfer_pair_id = '${transferPairId}'`);
   } else {
     await conn.query(`DELETE FROM checking_transactions WHERE id = '${id}'`);
   }

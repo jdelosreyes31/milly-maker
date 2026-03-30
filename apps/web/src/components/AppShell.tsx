@@ -3,6 +3,7 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import {
   LayoutDashboard,
   Landmark,
+  PiggyBank,
   CreditCard,
   TrendingUp,
   BarChart3,
@@ -19,6 +20,7 @@ import { AssistantPanel } from "@/features/assistant/AssistantPanel.js";
 const NAV_ITEMS = [
   { to: "/",            label: "Dashboard",   icon: LayoutDashboard },
   { to: "/checking",    label: "Checking",    icon: Landmark },
+  { to: "/savings",     label: "Savings",     icon: PiggyBank },
   { to: "/debts",       label: "Debts",       icon: CreditCard },
   { to: "/investments", label: "Investments", icon: TrendingUp },
   { to: "/forecast",    label: "Forecast",    icon: BarChart3 },

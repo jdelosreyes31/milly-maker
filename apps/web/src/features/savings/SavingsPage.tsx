@@ -1,50 +1,96 @@
 import React, { useState, useMemo } from "react";
 import {
-  Plus, Trash2, ChevronDown, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, Pencil, Settings2,
+  Plus, Trash2, ChevronDown, ArrowDownLeft, ArrowUpRight,
+  ArrowLeftRight, TrendingUp, Settings2,
 } from "lucide-react";
 import {
   Button, Card, CardContent, CardHeader, CardTitle,
   Dialog, Input, Select, Badge, formatCurrency, cn,
 } from "@milly-maker/ui";
-import { useCheckingAccounts, useCheckingTransactions } from "@/db/hooks/useChecking.js";
-import { useSavingsAccounts } from "@/db/hooks/useSavings.js";
-import type { TransactionType } from "@/db/queries/checking.js";
+import { useSavingsAccounts, useSavingsTransactions } from "@/db/hooks/useSavings.js";
+import type { SavingsAccountType, SavingsTransactionType } from "@/db/queries/savings.js";
 
-// ── Account setup dialog ──────────────────────────────────────────────────────
+// ── Account type options ───────────────────────────────────────────────────────
 
-interface AccountFormProps {
+const ACCOUNT_TYPE_OPTIONS = [
+  { value: "hysa", label: "HYSA — High Yield Savings" },
+  { value: "hsa", label: "HSA — Health Savings Account" },
+  { value: "savings", label: "Savings" },
+  { value: "other", label: "Other" },
+];
+
+const ACCOUNT_TYPE_LABELS: Record<SavingsAccountType, string> = {
+  hysa: "HYSA",
+  hsa: "HSA",
+  savings: "Savings",
+  other: "Savings",
+};
+
+// ── Account dialog ─────────────────────────────────────────────────────────────
+
+interface AccountFormState {
+  name: string;
+  account_type: SavingsAccountType;
+  starting_balance: string;
+  starting_date: string;
+  apr: string;
+}
+
+interface AccountDialogProps {
   open: boolean;
   onClose: () => void;
-  onSave: (data: { name: string; starting_balance: number; starting_date: string }) => Promise<void>;
-  initial?: { name: string; starting_balance: string; starting_date: string };
+  onSave: (data: {
+    name: string;
+    account_type: SavingsAccountType;
+    starting_balance: number;
+    starting_date: string;
+    apr: number;
+  }) => Promise<void>;
+  initial?: AccountFormState;
   title: string;
 }
 
-function AccountDialog({ open, onClose, onSave, initial, title }: AccountFormProps) {
-  const [name, setName] = useState(initial?.name ?? "");
-  const [balance, setBalance] = useState(initial?.starting_balance ?? "");
-  const [date, setDate] = useState(initial?.starting_date ?? new Date().toISOString().slice(0, 10));
+function AccountDialog({ open, onClose, onSave, initial, title }: AccountDialogProps) {
+  const [form, setForm] = useState<AccountFormState>({
+    name: initial?.name ?? "",
+    account_type: initial?.account_type ?? "hysa",
+    starting_balance: initial?.starting_balance ?? "",
+    starting_date: initial?.starting_date ?? new Date().toISOString().slice(0, 10),
+    apr: initial?.apr ?? "",
+  });
+  const [errors, setErrors] = useState<Partial<AccountFormState>>({});
   const [saving, setSaving] = useState(false);
-  const [errors, setErrors] = useState<Record<string, string>>({});
 
   React.useEffect(() => {
     if (open) {
-      setName(initial?.name ?? "");
-      setBalance(initial?.starting_balance ?? "");
-      setDate(initial?.starting_date ?? new Date().toISOString().slice(0, 10));
+      setForm({
+        name: initial?.name ?? "",
+        account_type: initial?.account_type ?? "hysa",
+        starting_balance: initial?.starting_balance ?? "",
+        starting_date: initial?.starting_date ?? new Date().toISOString().slice(0, 10),
+        apr: initial?.apr ?? "",
+      });
       setErrors({});
     }
-  }, [open, initial?.name, initial?.starting_balance, initial?.starting_date]);
+  }, [open, initial?.name, initial?.account_type, initial?.starting_balance, initial?.starting_date, initial?.apr]);
 
   async function handleSave() {
-    const e: Record<string, string> = {};
-    if (!name.trim()) e.name = "Required";
-    if (balance === "" || isNaN(Number(balance))) e.balance = "Enter a valid amount";
-    if (!date) e.date = "Required";
+    const e: Partial<AccountFormState> = {};
+    if (!form.name.trim()) e.name = "Required";
+    if (form.starting_balance === "" || isNaN(Number(form.starting_balance))) e.starting_balance = "Enter a valid amount";
+    if (!form.starting_date) e.starting_date = "Required";
+    if (form.apr === "" || isNaN(Number(form.apr)) || Number(form.apr) < 0) e.apr = "Enter a valid APR";
     setErrors(e);
     if (Object.keys(e).length > 0) return;
+
     setSaving(true);
-    await onSave({ name: name.trim(), starting_balance: Number(balance), starting_date: date });
+    await onSave({
+      name: form.name.trim(),
+      account_type: form.account_type,
+      starting_balance: Number(form.starting_balance),
+      starting_date: form.starting_date,
+      apr: Number(form.apr) / 100, // store as decimal
+    });
     setSaving(false);
     onClose();
   }
@@ -52,52 +98,86 @@ function AccountDialog({ open, onClose, onSave, initial, title }: AccountFormPro
   return (
     <Dialog open={open} onClose={onClose} title={title}>
       <div className="flex flex-col gap-4">
-        <Input label="Account Name" placeholder="e.g. Chase Checking" value={name} onChange={(e) => setName(e.target.value)} error={errors.name} />
-        <Input label="Starting Balance ($)" type="number" step="0.01" placeholder="e.g. 2500.00" value={balance} onChange={(e) => setBalance(e.target.value)} error={errors.balance} hint="Enter the balance on your starting date — your origin point." />
-        <Input label="Starting Date" type="date" value={date} onChange={(e) => setDate(e.target.value)} error={errors.date} hint="All transactions will be tracked from this date forward." />
+        <Input
+          label="Account Name"
+          placeholder="e.g. Marcus HYSA"
+          value={form.name}
+          onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+          error={errors.name}
+        />
+        <Select
+          label="Account Type"
+          options={ACCOUNT_TYPE_OPTIONS}
+          value={form.account_type}
+          onChange={(e) => setForm((f) => ({ ...f, account_type: e.target.value as SavingsAccountType }))}
+        />
+        <Input
+          label="Starting Balance ($)"
+          type="number"
+          step="0.01"
+          placeholder="e.g. 5000.00"
+          value={form.starting_balance}
+          onChange={(e) => setForm((f) => ({ ...f, starting_balance: e.target.value }))}
+          error={errors.starting_balance}
+          hint="Balance on your starting date — your origin point."
+        />
+        <Input
+          label="Starting Date"
+          type="date"
+          value={form.starting_date}
+          onChange={(e) => setForm((f) => ({ ...f, starting_date: e.target.value }))}
+          error={errors.starting_date}
+        />
+        <Input
+          label="APR (%)"
+          type="number"
+          step="0.01"
+          min="0"
+          placeholder="e.g. 4.50"
+          value={form.apr}
+          onChange={(e) => setForm((f) => ({ ...f, apr: e.target.value }))}
+          error={errors.apr}
+          hint="Annual percentage rate. Used to project annual interest earned."
+        />
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
-          <Button size="sm" onClick={handleSave} disabled={saving}>{saving ? "Saving…" : "Save Account"}</Button>
+          <Button size="sm" onClick={handleSave} disabled={saving}>
+            {saving ? "Saving…" : "Save Account"}
+          </Button>
         </div>
       </div>
     </Dialog>
   );
 }
 
-// ── Transaction form dialog ───────────────────────────────────────────────────
+// ── Transaction dialog ─────────────────────────────────────────────────────────
 
-const TYPE_OPTIONS = [
-  { value: "debit", label: "Debit (money out)" },
-  { value: "credit", label: "Credit (money in)" },
-  { value: "transfer", label: "Transfer to another account" },
+const TX_TYPE_OPTIONS = [
+  { value: "deposit", label: "Deposit (money in)" },
+  { value: "withdrawal", label: "Withdrawal (money out)" },
+  { value: "interest", label: "Interest earned" },
 ];
 
 interface TxFormState {
-  type: TransactionType;
+  type: "deposit" | "withdrawal" | "interest";
   amount: string;
   description: string;
   transaction_date: string;
-  // "checking:{id}" or "savings:{id}" — disambiguates destination table
-  transfer_to: string;
   notes: string;
 }
 
 const EMPTY_TX: TxFormState = {
-  type: "debit",
+  type: "deposit",
   amount: "",
   description: "",
   transaction_date: new Date().toISOString().slice(0, 10),
-  transfer_to: "",
   notes: "",
 };
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+// ── Main page ──────────────────────────────────────────────────────────────────
 
-export function CheckingPage() {
-  const { accounts, loading: accountsLoading, addAccount, editAccount, removeAccount } = useCheckingAccounts();
-  const { accounts: savingsAccounts } = useSavingsAccounts();
-
-  // Selected account: "ALL" or a specific account id
+export function SavingsPage() {
+  const { accounts, loading: accountsLoading, addAccount, editAccount, removeAccount } = useSavingsAccounts();
   const [selectedId, setSelectedId] = useState<string>("ALL");
 
   const effectiveId = accounts.length === 0 ? "ALL" : selectedId;
@@ -105,34 +185,33 @@ export function CheckingPage() {
   const {
     transactions, balanceSummary, loading: txLoading,
     addTransaction, removeTransaction, currentBalance,
-  } = useCheckingTransactions(effectiveId);
+  } = useSavingsTransactions(effectiveId);
 
-  // Account dialogs
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<typeof accounts[0] | null>(null);
-
-  // Transaction dialog
   const [txDialogOpen, setTxDialogOpen] = useState(false);
   const [txForm, setTxForm] = useState<TxFormState>(EMPTY_TX);
   const [txErrors, setTxErrors] = useState<Partial<TxFormState>>({});
   const [txSaving, setTxSaving] = useState(false);
-
-  // Account dropdown open state
   const [dropdownOpen, setDropdownOpen] = useState(false);
 
-  // When accounts load, default to ALL (or first account if only one)
   React.useEffect(() => {
     if (accounts.length === 1 && selectedId === "ALL") {
       setSelectedId(accounts[0]!.id);
     }
   }, [accounts, selectedId]);
 
-  const otherAccounts = accounts.filter((a) => a.id !== (effectiveId === "ALL" ? null : effectiveId));
+  const selectedAccount = accounts.find((a) => a.id === effectiveId);
+  const selectedSummary = balanceSummary.find((a) => a.account_id === effectiveId);
 
-  // Group transactions by week
+  // Projected annual interest for selected account
+  const projectedInterest = selectedSummary
+    ? Math.round(selectedSummary.current_balance * selectedSummary.apr * 100) / 100
+    : 0;
+
+  // Group transactions by week, most recent first
   const byWeek = useMemo(() => {
     const map: Record<string, typeof transactions> = {};
-    // Sort descending for display
     const sorted = [...transactions].sort((a, b) =>
       b.transaction_date.localeCompare(a.transaction_date) ||
       b.created_at.localeCompare(a.created_at)
@@ -146,20 +225,10 @@ export function CheckingPage() {
 
   const weekKeys = Object.keys(byWeek).sort((a, b) => b.localeCompare(a));
 
-  // Origin point for selected single account
-  const selectedAccount = accounts.find((a) => a.id === effectiveId);
-
-  // All possible transfer destinations: other checking accounts + all savings accounts
-  const transferDestOptions = [
-    ...otherAccounts.map((a) => ({ value: `checking:${a.id}`, label: a.name })),
-    ...savingsAccounts.map((a) => ({ value: `savings:${a.id}`, label: `Savings: ${a.name}` })),
-  ];
+  const totalAllBalance = balanceSummary.reduce((s, a) => s + a.current_balance, 0);
 
   function openAddTx() {
-    setTxForm({
-      ...EMPTY_TX,
-      transfer_to: transferDestOptions[0]?.value ?? "",
-    });
+    setTxForm(EMPTY_TX);
     setTxErrors({});
     setTxDialogOpen(true);
   }
@@ -170,8 +239,6 @@ export function CheckingPage() {
       e.amount = "Enter a valid amount";
     if (!txForm.description.trim()) e.description = "Description is required";
     if (!txForm.transaction_date) e.transaction_date = "Date is required";
-    if (txForm.type === "transfer" && !txForm.transfer_to)
-      e.transfer_to = "Select destination account";
     setTxErrors(e);
     return Object.keys(e).length === 0;
   }
@@ -180,56 +247,49 @@ export function CheckingPage() {
     if (!validateTx()) return;
     setTxSaving(true);
 
-    const sourceId = effectiveId === "ALL" ? (accounts[0]?.id ?? "") : effectiveId;
-
-    // Parse transfer destination
-    const isSavingsDest = txForm.transfer_to.startsWith("savings:");
-    const destId = txForm.transfer_to.replace(/^(checking|savings):/, "");
+    const accountId = effectiveId === "ALL" ? (accounts[0]?.id ?? "") : effectiveId;
 
     await addTransaction({
-      account_id: sourceId,
+      account_id: accountId,
       type: txForm.type,
       amount: Number(txForm.amount),
       description: txForm.description.trim(),
       transaction_date: txForm.transaction_date,
-      transfer_to_account_id: txForm.type === "transfer" && !isSavingsDest ? destId : undefined,
-      transfer_to_savings_account_id: txForm.type === "transfer" && isSavingsDest ? destId : undefined,
       notes: txForm.notes.trim() || undefined,
     });
     setTxSaving(false);
     setTxDialogOpen(false);
   }
 
-  const typeIcon = (type: TransactionType) => {
-    if (type === "credit") return <ArrowDownLeft size={13} className="text-[var(--color-success)]" />;
-    if (type === "transfer") return <ArrowLeftRight size={13} className="text-[var(--color-info)]" />;
+  const typeIcon = (type: SavingsTransactionType) => {
+    if (type === "deposit" || type === "transfer_in") return <ArrowDownLeft size={13} className="text-[var(--color-success)]" />;
+    if (type === "interest") return <TrendingUp size={13} className="text-[var(--color-primary)]" />;
     return <ArrowUpRight size={13} className="text-[var(--color-danger)]" />;
   };
 
-  const typeBadge = (type: TransactionType) => {
-    if (type === "credit") return <Badge variant="success">Credit</Badge>;
-    if (type === "transfer") return <Badge variant="outline">Transfer</Badge>;
-    return <Badge variant="danger">Debit</Badge>;
+  const typeBadge = (type: SavingsTransactionType) => {
+    if (type === "deposit") return <Badge variant="success">Deposit</Badge>;
+    if (type === "transfer_in") return <Badge variant="outline">Transfer In</Badge>;
+    if (type === "interest") return <Badge variant="default">Interest</Badge>;
+    return <Badge variant="danger">Withdrawal</Badge>;
   };
 
   const selectedLabel =
     effectiveId === "ALL" ? "All Accounts" : selectedAccount?.name ?? "Select Account";
 
-  const totalAllBalance = balanceSummary.reduce((s, a) => s + a.current_balance, 0);
-
-  // No accounts yet — prompt setup
+  // No accounts yet
   if (!accountsLoading && accounts.length === 0) {
     return (
       <div className="flex flex-col gap-6">
-        <h1 className="text-xl font-semibold">Checking</h1>
+        <h1 className="text-xl font-semibold">Savings</h1>
         <Card>
           <CardContent className="py-14 text-center">
-            <p className="mb-2 text-base font-medium">No checking accounts yet</p>
+            <p className="mb-2 text-base font-medium">No savings accounts yet</p>
             <p className="mb-6 text-sm text-[var(--color-text-muted)]">
-              Set up your first account with a starting balance and date to begin tracking.
+              Add your HYSA, HSA, or any savings account with a starting balance and APR.
             </p>
             <Button onClick={() => { setEditingAccount(null); setAccountDialogOpen(true); }}>
-              <Plus size={15} /> Add Checking Account
+              <Plus size={15} /> Add Savings Account
             </Button>
           </CardContent>
         </Card>
@@ -237,7 +297,7 @@ export function CheckingPage() {
           open={accountDialogOpen}
           onClose={() => setAccountDialogOpen(false)}
           onSave={(d) => addAccount(d)}
-          title="New Checking Account"
+          title="New Savings Account"
         />
       </div>
     );
@@ -248,7 +308,7 @@ export function CheckingPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h1 className="text-xl font-semibold">Checking</h1>
+          <h1 className="text-xl font-semibold">Savings</h1>
 
           {/* Account dropdown */}
           <div className="relative">
@@ -263,8 +323,7 @@ export function CheckingPage() {
             {dropdownOpen && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setDropdownOpen(false)} />
-                <div className="absolute left-0 top-full z-20 mt-1 min-w-48 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg">
-                  {/* All accounts option */}
+                <div className="absolute left-0 top-full z-20 mt-1 min-w-52 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg">
                   <button
                     onClick={() => { setSelectedId("ALL"); setDropdownOpen(false); }}
                     className={cn(
@@ -278,9 +337,8 @@ export function CheckingPage() {
 
                   <div className="my-1 h-px bg-[var(--color-border-subtle)]" />
 
-                  {/* Individual accounts */}
                   {accounts.map((a) => {
-                    const bal = balanceSummary.find((b) => b.account_id === a.id)?.current_balance ?? 0;
+                    const summary = balanceSummary.find((b) => b.account_id === a.id);
                     return (
                       <button
                         key={a.id}
@@ -290,15 +348,21 @@ export function CheckingPage() {
                           effectiveId === a.id && "text-[var(--color-primary)]"
                         )}
                       >
-                        <span>{a.name}</span>
-                        <span className="text-xs text-[var(--color-text-muted)]">{formatCurrency(bal)}</span>
+                        <div className="flex flex-col">
+                          <span>{a.name}</span>
+                          <span className="text-[10px] text-[var(--color-text-subtle)]">
+                            {ACCOUNT_TYPE_LABELS[a.account_type]} · {(a.apr * 100).toFixed(2)}% APR
+                          </span>
+                        </div>
+                        <span className="text-xs text-[var(--color-text-muted)]">
+                          {formatCurrency(summary?.current_balance ?? 0)}
+                        </span>
                       </button>
                     );
                   })}
 
                   <div className="my-1 h-px bg-[var(--color-border-subtle)]" />
 
-                  {/* Add account */}
                   <button
                     onClick={() => { setEditingAccount(null); setAccountDialogOpen(true); setDropdownOpen(false); }}
                     className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-[var(--color-text-muted)] hover:bg-[var(--color-surface-raised)] hover:text-[var(--color-text)]"
@@ -332,14 +396,12 @@ export function CheckingPage() {
         {/* Current balance */}
         <Card className="relative overflow-hidden">
           <div className="absolute left-0 top-0 h-full w-1 rounded-l-[var(--radius)]"
-            style={{ backgroundColor: currentBalance >= 0 ? "var(--color-success)" : "var(--color-danger)" }} />
+            style={{ backgroundColor: "var(--color-success)" }} />
           <CardContent className="p-5 pl-6">
             <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
               {effectiveId === "ALL" ? "Combined Balance" : "Current Balance"}
             </p>
-            <p className={cn("mt-1 text-2xl font-bold", currentBalance < 0 && "text-[var(--color-danger)]")}>
-              {formatCurrency(currentBalance)}
-            </p>
+            <p className="mt-1 text-2xl font-bold">{formatCurrency(currentBalance)}</p>
             {selectedAccount && (
               <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">
                 Started {formatDate(selectedAccount.starting_date)} at {formatCurrency(selectedAccount.starting_balance)}
@@ -348,13 +410,45 @@ export function CheckingPage() {
           </CardContent>
         </Card>
 
+        {/* APR + projected interest for single account */}
+        {selectedSummary && effectiveId !== "ALL" && (
+          <Card>
+            <CardContent className="p-5">
+              <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">APR</p>
+              <p className="mt-1 text-2xl font-bold text-[var(--color-success)]">
+                {(selectedSummary.apr * 100).toFixed(2)}%
+              </p>
+              <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">
+                ≈ {formatCurrency(projectedInterest)}/yr projected
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Account type badge */}
+        {selectedSummary && effectiveId !== "ALL" && (
+          <Card>
+            <CardContent className="p-5">
+              <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">Account Type</p>
+              <p className="mt-2 text-lg font-bold">{ACCOUNT_TYPE_LABELS[selectedSummary.account_type]}</p>
+              <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">
+                {selectedSummary.account_type === "hysa" && "High Yield Savings"}
+                {selectedSummary.account_type === "hsa" && "Health Savings Account"}
+                {selectedSummary.account_type === "savings" && "Savings Account"}
+                {selectedSummary.account_type === "other" && "Savings Account"}
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Per-account balances when viewing ALL */}
         {effectiveId === "ALL" && balanceSummary.map((a) => (
           <Card key={a.account_id}>
             <CardContent className="p-5">
               <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">{a.account_name}</p>
-              <p className={cn("mt-1 text-xl font-bold", a.current_balance < 0 && "text-[var(--color-danger)]")}>
-                {formatCurrency(a.current_balance)}
+              <p className="mt-1 text-xl font-bold">{formatCurrency(a.current_balance)}</p>
+              <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">
+                {ACCOUNT_TYPE_LABELS[a.account_type]} · {(a.apr * 100).toFixed(2)}% APR
               </p>
             </CardContent>
           </Card>
@@ -368,24 +462,22 @@ export function CheckingPage() {
         <Card>
           <CardContent className="py-12 text-center text-sm text-[var(--color-text-muted)]">
             No transactions yet.{" "}
-            <button onClick={openAddTx} className="text-[var(--color-primary)] underline">Add one</button>.
+            <button onClick={openAddTx} className="text-[var(--color-primary)] underline">Add one</button>
+            {" "}or transfer from Checking.
           </CardContent>
         </Card>
       ) : (
         weekKeys.map((week) => {
           const items = byWeek[week]!;
-          // Use the last transaction's running_balance as the week's closing balance
-          const closingBalance = [...items].sort((a, b) =>
-            a.transaction_date.localeCompare(b.transaction_date)
-          ).at(-1)?.running_balance ?? 0;
+          const closingBalance = [...items]
+            .sort((a, b) => a.transaction_date.localeCompare(b.transaction_date))
+            .at(-1)?.running_balance ?? 0;
 
           return (
             <Card key={week}>
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
-                  <CardTitle className="text-sm font-semibold">
-                    Week of {formatDate(week)}
-                  </CardTitle>
+                  <CardTitle className="text-sm font-semibold">Week of {formatDate(week)}</CardTitle>
                   <span className="text-sm font-medium text-[var(--color-text-muted)]">
                     Balance: {formatCurrency(closingBalance)}
                   </span>
@@ -406,9 +498,11 @@ export function CheckingPage() {
                           {formatDate(tx.transaction_date)}
                         </td>
                         <td className={cn("py-2 pr-3 text-right font-medium",
-                          tx.type === "credit" ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"
+                          tx.type === "withdrawal"
+                            ? "text-[var(--color-danger)]"
+                            : "text-[var(--color-success)]"
                         )}>
-                          {tx.type === "credit" ? "+" : "-"}{formatCurrency(tx.amount)}
+                          {tx.type === "withdrawal" ? "-" : "+"}{formatCurrency(tx.amount)}
                         </td>
                         <td className="py-2 pr-3 text-right text-xs text-[var(--color-text-muted)]">
                           {formatCurrency(tx.running_balance)}
@@ -417,6 +511,7 @@ export function CheckingPage() {
                           <button
                             onClick={() => removeTransaction(tx.id, tx.transfer_pair_id)}
                             className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]"
+                            title={tx.transfer_pair_id ? "Delete transfer (removes checking debit too)" : "Delete"}
                           >
                             <Trash2 size={13} />
                           </button>
@@ -436,21 +531,18 @@ export function CheckingPage() {
         <div className="flex flex-col gap-4">
           <Select
             label="Type"
-            options={TYPE_OPTIONS}
+            options={TX_TYPE_OPTIONS}
             value={txForm.type}
-            onChange={(e) => setTxForm((f) => ({ ...f, type: e.target.value as TransactionType }))}
+            onChange={(e) => setTxForm((f) => ({ ...f, type: e.target.value as TxFormState["type"] }))}
           />
-
-          {/* Source account selector when viewing ALL */}
-          {effectiveId === "ALL" && (
+          {effectiveId === "ALL" && accounts.length > 1 && (
             <Select
               label="Account"
               options={accounts.map((a) => ({ value: a.id, label: a.name }))}
               value={accounts[0]?.id ?? ""}
-              onChange={(e) => setTxForm((f) => ({ ...f, account_id: e.target.value }))}
+              onChange={() => {}}
             />
           )}
-
           <Input
             label="Amount ($)"
             type="number"
@@ -463,23 +555,15 @@ export function CheckingPage() {
           />
           <Input
             label="Description"
-            placeholder={txForm.type === "transfer" ? "e.g. Monthly savings transfer" : txForm.type === "credit" ? "e.g. Paycheck deposit" : "e.g. Whole Foods"}
+            placeholder={
+              txForm.type === "deposit" ? "e.g. Monthly transfer" :
+              txForm.type === "interest" ? "e.g. April interest" :
+              "e.g. Medical expense"
+            }
             value={txForm.description}
             onChange={(e) => setTxForm((f) => ({ ...f, description: e.target.value }))}
             error={txErrors.description}
           />
-
-          {txForm.type === "transfer" && (
-            <Select
-              label="Transfer To"
-              options={transferDestOptions}
-              placeholder={transferDestOptions.length === 0 ? "No destinations available" : undefined}
-              value={txForm.transfer_to}
-              onChange={(e) => setTxForm((f) => ({ ...f, transfer_to: e.target.value }))}
-              error={txErrors.transfer_to}
-            />
-          )}
-
           <Input
             label="Date"
             type="date"
@@ -493,7 +577,6 @@ export function CheckingPage() {
             value={txForm.notes}
             onChange={(e) => setTxForm((f) => ({ ...f, notes: e.target.value }))}
           />
-
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="outline" size="sm" onClick={() => setTxDialogOpen(false)}>Cancel</Button>
             <Button size="sm" onClick={handleSaveTx} disabled={txSaving}>
@@ -516,10 +599,12 @@ export function CheckingPage() {
         }}
         initial={editingAccount ? {
           name: editingAccount.name,
+          account_type: editingAccount.account_type,
           starting_balance: String(editingAccount.starting_balance),
           starting_date: editingAccount.starting_date,
+          apr: String(editingAccount.apr * 100),
         } : undefined}
-        title={editingAccount ? "Edit Account" : "New Checking Account"}
+        title={editingAccount ? "Edit Account" : "New Savings Account"}
       />
     </div>
   );
