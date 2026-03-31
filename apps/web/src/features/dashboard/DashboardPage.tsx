@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from "react";
-import { DollarSign, CreditCard, TrendingUp, Landmark } from "lucide-react";
+import { DollarSign, CreditCard, TrendingUp, Landmark, PiggyBank } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, StatCard, formatCurrency } from "@milly-maker/ui";
 import { useDebts } from "@/db/hooks/useDebts.js";
 import { useInvestments } from "@/db/hooks/useInvestments.js";
 import { useDb } from "@/db/hooks/useDb.js";
 import { getNetWorthHistory } from "@/db/queries/investments.js";
 import { getCheckingBalanceSummary } from "@/db/queries/checking.js";
+import { getSavingsBalanceSummary } from "@/db/queries/savings.js";
+import type { SavingsAccountType } from "@/db/queries/savings.js";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
   CartesianGrid, BarChart, Bar, Cell,
@@ -21,9 +23,13 @@ export function DashboardPage() {
   const [checkingAccounts, setCheckingAccounts] = useState<
     { account_id: string; account_name: string; current_balance: number }[]
   >([]);
+  const [savingsAccounts, setSavingsAccounts] = useState<
+    { account_id: string; account_name: string; account_type: SavingsAccountType; apr: number; current_balance: number }[]
+  >([]);
 
   const netWorth = totalValue - totalDebt;
   const totalChecking = checkingAccounts.reduce((s, a) => s + a.current_balance, 0);
+  const totalSavings = savingsAccounts.reduce((s, a) => s + a.current_balance, 0);
 
   useEffect(() => {
     if (!conn) return;
@@ -35,6 +41,7 @@ export function DashboardPage() {
   useEffect(() => {
     if (!conn) return;
     void getCheckingBalanceSummary(conn).then(setCheckingAccounts);
+    void getSavingsBalanceSummary(conn).then(setSavingsAccounts);
   }, [conn]);
 
   return (
@@ -42,7 +49,7 @@ export function DashboardPage() {
       <h1 className="text-xl font-semibold">Dashboard</h1>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <StatCard
           label="Net Worth"
           value={formatCurrency(netWorth, true)}
@@ -51,14 +58,21 @@ export function DashboardPage() {
           accentColor={netWorth >= 0 ? "var(--color-success)" : "var(--color-danger)"}
         />
         <StatCard
-          label="Checking Balance"
+          label="Checking"
           value={formatCurrency(totalChecking, true)}
           subValue={`${checkingAccounts.length} account${checkingAccounts.length !== 1 ? "s" : ""}`}
           icon={<Landmark size={16} />}
           accentColor="var(--color-chart-3)"
         />
         <StatCard
-          label="Total Investments"
+          label="Savings"
+          value={formatCurrency(totalSavings, true)}
+          subValue={`${savingsAccounts.length} account${savingsAccounts.length !== 1 ? "s" : ""}`}
+          icon={<PiggyBank size={16} />}
+          accentColor="var(--color-chart-2)"
+        />
+        <StatCard
+          label="Investments"
           value={formatCurrency(totalValue, true)}
           subValue={`+${formatCurrency(totalMonthlyContribution)}/mo`}
           icon={<TrendingUp size={16} />}
@@ -73,7 +87,7 @@ export function DashboardPage() {
         />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-3">
         {/* Net worth history */}
         <Card>
           <CardHeader><CardTitle>Net Worth Over Time</CardTitle></CardHeader>
@@ -142,6 +156,57 @@ export function DashboardPage() {
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Savings account balances */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Savings Accounts</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {savingsAccounts.length === 0 ? (
+              <div className="flex h-40 items-center justify-center text-sm text-[var(--color-text-muted)]">
+                No savings accounts set up yet. Head to Savings to add one.
+              </div>
+            ) : savingsAccounts.length === 1 ? (
+              <div className="flex h-40 items-center justify-center">
+                <div className="text-center">
+                  <p className="text-xs text-[var(--color-text-muted)] mb-1">{savingsAccounts[0]!.account_name}</p>
+                  <p className="text-3xl font-bold">{formatCurrency(savingsAccounts[0]!.current_balance)}</p>
+                  {savingsAccounts[0]!.apr > 0 && (
+                    <p className="mt-1 text-xs text-[var(--color-success)]">
+                      {(savingsAccounts[0]!.apr * 100).toFixed(2)}% APR
+                      &nbsp;·&nbsp;~{formatCurrency(savingsAccounts[0]!.current_balance * savingsAccounts[0]!.apr)}/yr
+                    </p>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2 pt-1">
+                {savingsAccounts.map((a, i) => (
+                  <div key={a.account_id} className="flex items-center justify-between rounded-[var(--radius)] px-3 py-2 bg-[var(--color-surface-raised)]">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="h-2 w-2 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
+                      />
+                      <div>
+                        <p className="text-sm font-medium">{a.account_name}</p>
+                        {a.apr > 0 && (
+                          <p className="text-xs text-[var(--color-success)]">{(a.apr * 100).toFixed(2)}% APR</p>
+                        )}
+                      </div>
+                    </div>
+                    <p className="text-sm font-semibold tabular-nums">{formatCurrency(a.current_balance)}</p>
+                  </div>
+                ))}
+                <div className="flex items-center justify-between px-3 pt-1 border-t border-[var(--color-border)]">
+                  <p className="text-xs text-[var(--color-text-muted)]">Total</p>
+                  <p className="text-sm font-bold tabular-nums">{formatCurrency(totalSavings)}</p>
+                </div>
+              </div>
             )}
           </CardContent>
         </Card>
