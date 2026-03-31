@@ -2,11 +2,13 @@ import type { AsyncDuckDBConnection } from "@duckdb/duckdb-wasm";
 import schema001 from "./001_initial_schema.sql?raw";
 import schema002 from "./002_checking.sql?raw";
 import schema003 from "./003_savings.sql?raw";
+import schema004 from "./004_fantasy.sql?raw";
 
 const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "001_initial_schema", sql: schema001 },
   { name: "002_checking", sql: schema002 },
   { name: "003_savings", sql: schema003 },
+  { name: "004_fantasy", sql: schema004 },
 ];
 
 export async function runMigrations(conn: AsyncDuckDBConnection): Promise<void> {

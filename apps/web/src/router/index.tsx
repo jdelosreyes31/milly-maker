@@ -12,6 +12,7 @@ import { DebtsPage } from "@/features/debts/DebtsPage.js";
 import { InvestmentsPage } from "@/features/investments/InvestmentsPage.js";
 import { ForecastPage } from "@/features/forecast/ForecastPage.js";
 import { SavingsPage } from "@/features/savings/SavingsPage.js";
+import { FantasyPage } from "@/features/fantasy/FantasyPage.js";
 import { PlanningPage } from "@/features/planning/PlanningPage.js";
 import { SettingsPage } from "@/features/settings/SettingsPage.js";
 
@@ -30,7 +31,8 @@ const checkingRoute  = createRoute({ getParentRoute: () => rootRoute, path: "/ch
 const debtsRoute     = createRoute({ getParentRoute: () => rootRoute, path: "/debts", component: DebtsPage });
 const investmentsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/investments", component: InvestmentsPage });
 const forecastRoute  = createRoute({ getParentRoute: () => rootRoute, path: "/forecast", component: ForecastPage });
-const savingsRoute   = createRoute({ getParentRoute: () => rootRoute, path: "/savings", component: SavingsPage });
+const savingsRoute   = createRoute({ getParentRoute: () => rootRoute, path: "/savings",  component: SavingsPage });
+const fantasyRoute   = createRoute({ getParentRoute: () => rootRoute, path: "/fantasy",  component: FantasyPage });
 const planningRoute  = createRoute({ getParentRoute: () => rootRoute, path: "/planning", component: PlanningPage });
 const settingsRoute  = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: SettingsPage });
 
@@ -38,6 +40,7 @@ const routeTree = rootRoute.addChildren([
   dashboardRoute,
   checkingRoute,
   savingsRoute,
+  fantasyRoute,
   debtsRoute,
   investmentsRoute,
   forecastRoute,
