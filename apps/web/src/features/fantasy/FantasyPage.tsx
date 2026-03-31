@@ -585,13 +585,27 @@ export function FantasyPage() {
 
   // Totals for stat cards
   const perfStats = useMemo(() => {
-    const totalIn      = sbSummary.reduce((s, a) => s + a.total_deposited, 0);
-    const totalOut     = sbSummary.reduce((s, a) => s + a.total_cashout, 0);
-    const inAccounts   = sbSummary.reduce((s, a) => s + a.current_balance, 0);
-    // Net P&L: cash you've extracted vs cash you've deposited, plus remaining balance
-    const netPnL = totalOut + inAccounts - totalIn;
+    // Sportsbook/DFS: only count explicit deposit/cashout transactions.
+    // starting_balance is an account snapshot (origin point), not a P&L event.
+    const sbTotalIn  = sbSummary.reduce((s, a) => s + a.total_deposited, 0);
+    const sbTotalOut = sbSummary.reduce((s, a) => s + a.total_cashout, 0);
+    const inAccounts = sbSummary.reduce((s, a) => s + a.current_balance, 0);
+
+    // Fantasy leagues: buy-ins ARE explicit money spent, so include them.
+    // Won season payouts (potential_payout) count as money received.
+    const leagueBuyIn = seasons.reduce((s, se) => s + se.buy_in, 0);
+    const leagueWon   = seasons
+      .filter((se) => se.status === "won")
+      .reduce((s, se) => s + (se.potential_payout ?? 0), 0);
+
+    const totalIn  = sbTotalIn + leagueBuyIn;
+    const totalOut = sbTotalOut + leagueWon;
+    // Realized P&L: what you've cashed out/won minus what you've put in.
+    // "Still in accounts" is shown separately — it isn't counted here so that
+    // brand-new accounts with only a starting_balance don't distort the number.
+    const netPnL = totalOut - totalIn;
     return { totalIn, totalOut, inAccounts, netPnL };
-  }, [sbSummary]);
+  }, [sbSummary, seasons]);
 
   // Monthly net per platform (for bar chart)
   const monthlyChartData = useMemo(() => {
