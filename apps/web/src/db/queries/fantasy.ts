@@ -22,6 +22,7 @@ export interface FantasyTransaction {
   id: string;
   account_id: string;
   account_name: string;
+  platform_type: FantasyPlatformType;
   type: FantasyTxType;
   amount: number;
   description: string;
@@ -178,7 +179,7 @@ export async function getFantasyTransactions(
   const where = accountId === "ALL" ? "1=1" : `t.account_id = '${accountId}'`;
   const result = await conn.query(`
     SELECT
-      t.id, t.account_id, a.name AS account_name, t.type,
+      t.id, t.account_id, a.name AS account_name, a.platform_type, t.type,
       t.amount::DOUBLE AS amount,
       t.description,
       t.transaction_date::VARCHAR AS transaction_date,

@@ -5,6 +5,11 @@ import {
   Check, X, Minus, Settings2, Trophy, TrendingUp,
 } from "lucide-react";
 import {
+  BarChart, Bar, LineChart, Line,
+  XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, ReferenceLine, Legend,
+} from "recharts";
+import {
   Button, Card, CardContent, CardHeader, CardTitle,
   Dialog, Input, Select, Badge, formatCurrency, cn,
 } from "@milly-maker/ui";
@@ -13,6 +18,13 @@ import type {
   FantasyPlatformType, FantasyTxType,
   FutureStatus, SeasonStatus,
 } from "@/db/queries/fantasy.js";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function fmtMonth(yyyyMm: string): string {
+  const [year, month] = yyyyMm.split("-");
+  return new Date(Number(year), Number(month) - 1, 1).toLocaleString("default", { month: "short", year: "2-digit" });
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -563,6 +575,71 @@ export function FantasyPage() {
   }, [transactions]);
   const weekKeys = Object.keys(byWeek).sort((a, b) => b.localeCompare(a));
 
+  // ── Performance analytics (sportsbook + DFS only) ──────────────────────────
+
+  // Non-league summary rows
+  const sbSummary = useMemo(
+    () => balanceSummary.filter((a) => !isLeague(a.platform_type)),
+    [balanceSummary]
+  );
+
+  // Totals for stat cards
+  const perfStats = useMemo(() => {
+    const totalIn      = sbSummary.reduce((s, a) => s + a.total_deposited, 0);
+    const totalOut     = sbSummary.reduce((s, a) => s + a.total_cashout, 0);
+    const inAccounts   = sbSummary.reduce((s, a) => s + a.current_balance, 0);
+    // Net P&L: cash you've extracted vs cash you've deposited, plus remaining balance
+    const netPnL = totalOut + inAccounts - totalIn;
+    return { totalIn, totalOut, inAccounts, netPnL };
+  }, [sbSummary]);
+
+  // Monthly net per platform (for bar chart)
+  const monthlyChartData = useMemo(() => {
+    const sbTxs = transactions.filter((tx) => !isLeague(tx.platform_type));
+    const byMonth = new Map<string, { dfs: number; sportsbook: number }>();
+    for (const tx of sbTxs) {
+      const month = tx.transaction_date.slice(0, 7);
+      const curr = byMonth.get(month) ?? { dfs: 0, sportsbook: 0 };
+      const sign = tx.type === "cashout" ? 1 : -1;
+      const key = tx.platform_type === "dfs" ? "dfs" : "sportsbook";
+      curr[key] += sign * tx.amount;
+      byMonth.set(month, curr);
+    }
+    return Array.from(byMonth.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([month, d]) => ({
+        month: fmtMonth(month),
+        DFS: Math.round(d.dfs * 100) / 100,
+        Sportsbook: Math.round(d.sportsbook * 100) / 100,
+      }));
+  }, [transactions]);
+
+  // Cumulative P&L over time (for line chart)
+  const cumulativeChartData = useMemo(() => {
+    const sbTxs = transactions
+      .filter((tx) => !isLeague(tx.platform_type))
+      .slice()
+      .sort((a, b) => a.transaction_date.localeCompare(b.transaction_date));
+    let dfsCum = 0; let sbCum = 0;
+    const byMonth = new Map<string, { DFS: number; Sportsbook: number; Combined: number }>();
+    for (const tx of sbTxs) {
+      const month = tx.transaction_date.slice(0, 7);
+      const sign = tx.type === "cashout" ? 1 : -1;
+      if (tx.platform_type === "dfs") dfsCum += sign * tx.amount;
+      else sbCum += sign * tx.amount;
+      byMonth.set(month, {
+        DFS: Math.round(dfsCum * 100) / 100,
+        Sportsbook: Math.round(sbCum * 100) / 100,
+        Combined: Math.round((dfsCum + sbCum) * 100) / 100,
+      });
+    }
+    return Array.from(byMonth.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([month, d]) => ({ month: fmtMonth(month), ...d }));
+  }, [transactions]);
+
+  const hasPerformanceData = !viewIsLeague && (monthlyChartData.length > 0 || sbSummary.length > 0);
+
   const selectedLabel = effectiveId === "ALL" ? "All Accounts" : selectedAccount?.name ?? "Select Account";
 
   // Transaction dialog
@@ -875,6 +952,119 @@ export function FantasyPage() {
             </Card>
           ))}
         </div>
+      )}
+
+      {/* ── Performance analytics ────────────────────────────────────────── */}
+      {hasPerformanceData && (
+        <>
+          {/* Stat cards */}
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Card className="relative overflow-hidden">
+              <div className="absolute left-0 top-0 h-full w-1 rounded-l-[var(--radius)]"
+                style={{ backgroundColor: perfStats.netPnL >= 0 ? "var(--color-success)" : "var(--color-danger)" }} />
+              <CardContent className="p-5 pl-6">
+                <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">Net P&L</p>
+                <p className={cn("mt-1 text-2xl font-bold",
+                  perfStats.netPnL > 0 ? "text-[var(--color-success)]" : perfStats.netPnL < 0 ? "text-[var(--color-danger)]" : ""
+                )}>
+                  {perfStats.netPnL >= 0 ? "+" : ""}{formatCurrency(perfStats.netPnL)}
+                </p>
+                <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">cashouts + balance − deposits</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-5">
+                <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">Total Deposited</p>
+                <p className="mt-1 text-2xl font-bold">{formatCurrency(perfStats.totalIn)}</p>
+                <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">money sent to platforms</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-5">
+                <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">Total Cashed Out</p>
+                <p className="mt-1 text-2xl font-bold text-[var(--color-success)]">{formatCurrency(perfStats.totalOut)}</p>
+                <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">money returned to you</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-5">
+                <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">Still In Accounts</p>
+                <p className="mt-1 text-2xl font-bold">{formatCurrency(perfStats.inAccounts)}</p>
+                <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">current tracked balance</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Charts */}
+          {monthlyChartData.length > 0 && (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+
+              {/* Monthly net cash flow by platform */}
+              <Card>
+                <CardHeader className="pb-0">
+                  <CardTitle className="text-sm font-semibold">Monthly Net Cash Flow</CardTitle>
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    Positive = net cashout that month · Negative = net deposit
+                  </p>
+                </CardHeader>
+                <CardContent className="pt-4">
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={monthlyChartData} barCategoryGap="30%">
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-subtle)" vertical={false} />
+                      <XAxis dataKey="month" tick={{ fontSize: 11, fill: "var(--color-text-muted)" }} axisLine={false} tickLine={false} />
+                      <YAxis tickFormatter={(v) => `$${Math.abs(v)}`} tick={{ fontSize: 11, fill: "var(--color-text-muted)" }} axisLine={false} tickLine={false} width={55} />
+                      <Tooltip
+                        formatter={(val: number, name: string) => [
+                          `${val >= 0 ? "+" : ""}${formatCurrency(val)}`,
+                          name,
+                        ]}
+                        contentStyle={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius-sm)", fontSize: 12 }}
+                        labelStyle={{ color: "var(--color-text)", fontWeight: 600 }}
+                      />
+                      <ReferenceLine y={0} stroke="var(--color-border)" />
+                      <Legend wrapperStyle={{ fontSize: 12, paddingTop: 8 }} />
+                      <Bar dataKey="DFS" fill="#6366f1" radius={[3, 3, 0, 0]} />
+                      <Bar dataKey="Sportsbook" fill="#f59e0b" radius={[3, 3, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+
+              {/* Cumulative P&L trend */}
+              <Card>
+                <CardHeader className="pb-0">
+                  <CardTitle className="text-sm font-semibold">Cumulative P&L Trend</CardTitle>
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    Running net of cashouts minus deposits over time
+                  </p>
+                </CardHeader>
+                <CardContent className="pt-4">
+                  <ResponsiveContainer width="100%" height={220}>
+                    <LineChart data={cumulativeChartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-subtle)" vertical={false} />
+                      <XAxis dataKey="month" tick={{ fontSize: 11, fill: "var(--color-text-muted)" }} axisLine={false} tickLine={false} />
+                      <YAxis tickFormatter={(v) => `${v >= 0 ? "+" : ""}$${Math.abs(v)}`} tick={{ fontSize: 11, fill: "var(--color-text-muted)" }} axisLine={false} tickLine={false} width={60} />
+                      <Tooltip
+                        formatter={(val: number, name: string) => [
+                          `${val >= 0 ? "+" : ""}${formatCurrency(val)}`,
+                          name,
+                        ]}
+                        contentStyle={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius-sm)", fontSize: 12 }}
+                        labelStyle={{ color: "var(--color-text)", fontWeight: 600 }}
+                      />
+                      <ReferenceLine y={0} stroke="var(--color-border)" strokeDasharray="4 2" label={{ value: "Break-even", position: "insideTopRight", fontSize: 10, fill: "var(--color-text-subtle)" }} />
+                      <Legend wrapperStyle={{ fontSize: 12, paddingTop: 8 }} />
+                      <Line type="monotone" dataKey="DFS" stroke="#6366f1" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="Sportsbook" stroke="#f59e0b" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="Combined" stroke="var(--color-text-muted)" strokeWidth={2} strokeDasharray="4 2" dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+
+            </div>
+          )}
+        </>
       )}
 
       {/* ── Seasons section (league accounts) ─────────────────────────────── */}
