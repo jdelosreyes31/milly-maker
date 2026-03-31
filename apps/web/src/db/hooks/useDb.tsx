@@ -49,6 +49,16 @@ export function DbProvider({ children }: { children: React.ReactNode }) {
   }
 
   if (status === "error") {
+    async function handleReset() {
+      try {
+        const root = await navigator.storage.getDirectory();
+        for (const name of ["milly-maker.db", "milly-maker.db.wal", "milly-maker.db.shm"]) {
+          try { await root.removeEntry(name); } catch { /* file may not exist */ }
+        }
+      } catch { /* ignore */ }
+      location.reload();
+    }
+
     return (
       <div className="flex h-screen items-center justify-center bg-[var(--color-background)] p-6">
         <div className="max-w-md rounded-[var(--radius)] border border-[var(--color-danger)]/40 bg-[var(--color-surface)] p-6 text-center">
@@ -57,6 +67,22 @@ export function DbProvider({ children }: { children: React.ReactNode }) {
           <p className="mt-3 text-xs text-[var(--color-text-subtle)]">
             Make sure you're using Chrome or Edge for full OPFS support.
           </p>
+          {opfsSupported && (
+            <div className="mt-5 border-t border-[var(--color-border)] pt-5">
+              <p className="mb-3 text-xs text-[var(--color-text-subtle)]">
+                If the database is corrupted, you can wipe it and start fresh.
+                <span className="block mt-1 font-medium text-[var(--color-danger)]/80">
+                  This will permanently delete all your data.
+                </span>
+              </p>
+              <button
+                onClick={handleReset}
+                className="rounded-[var(--radius)] border border-[var(--color-danger)]/40 bg-[var(--color-danger)]/10 px-4 py-2 text-sm font-medium text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger)]/20"
+              >
+                Reset Database
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
