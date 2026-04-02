@@ -76,6 +76,37 @@ export async function initDuckDB(): Promise<duckdb.AsyncDuckDBConnection> {
   }
 
   _conn = await tryOpen();
+
+  // ── WAL prevention ────────────────────────────────────────────────────────
+  // The WAL corrupts when the browser kills the tab before DuckDB can checkpoint.
+  // Fix: checkpoint aggressively so the WAL is always small / empty at close time.
+
+  async function checkpoint() {
+    if (!_conn) return;
+    try { await _conn.query("CHECKPOINT"); } catch { /* ignore if already closing */ }
+  }
+
+  async function closeDb() {
+    if (!_conn) return;
+    try { await _conn.close(); } catch { /* ignore */ }
+    if (_db) { try { await _db.terminate(); } catch { /* ignore */ } }
+    _conn = null;
+    _db = null;
+  }
+
+  // Checkpoint when tab goes to background (catches tab switches and most closes)
+  function onVisibilityChange() {
+    if (document.visibilityState === "hidden") void checkpoint();
+  }
+  // Close + checkpoint on actual page unload (back/forward, close, navigate away)
+  function onPageHide() { void closeDb(); }
+
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  window.addEventListener("pagehide", onPageHide);
+
+  // Periodic checkpoint every 30 s — keeps WAL tiny so crash window is small
+  setInterval(() => void checkpoint(), 30_000);
+
   return _conn;
 }
 
