@@ -4,6 +4,7 @@ import schema002 from "./002_checking.sql?raw";
 import schema003 from "./003_savings.sql?raw";
 import schema004 from "./004_fantasy.sql?raw";
 import schema005 from "./005_fantasy_amendments.sql?raw";
+import schema006 from "./006_subscriptions.sql?raw";
 
 const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "001_initial_schema", sql: schema001 },
@@ -11,6 +12,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "003_savings", sql: schema003 },
   { name: "004_fantasy", sql: schema004 },
   { name: "005_fantasy_amendments", sql: schema005 },
+  { name: "006_subscriptions", sql: schema006 },
 ];
 
 export async function runMigrations(conn: AsyncDuckDBConnection): Promise<void> {

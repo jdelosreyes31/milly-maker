@@ -1,9 +1,11 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { Sparkles } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { Card, CardContent, CardHeader, CardTitle, Badge, formatCurrency } from "@milly-maker/ui";
 import { useDb } from "@/db/hooks/useDb.js";
 import { getMonthlyCreditTotals, getMonthlyDebitTotals } from "@/db/queries/checking.js";
 import { useUIStore } from "@/store/ui.store.js";
+import { useSubscriptions } from "@/db/hooks/useSubscriptions.js";
 
 export const PLANNING_STORAGE_KEY = "planningSettings";
 
@@ -41,6 +43,7 @@ function statusVariant(s: Status): "success" | "warning" | "danger" | "default" 
 export function PlanningPage() {
   const { conn } = useDb();
   const { toggleAssistant, assistantOpen, setPendingAssistantMessage } = useUIStore();
+  const { subscriptions, totalMonthly: totalSubMonthly } = useSubscriptions();
 
   const [monthlyCredits, setMonthlyCredits] = useState<{ month: string; total: number }[]>([]);
   const [monthlyDebits, setMonthlyDebits] = useState<{ month: string; total: number }[]>([]);
@@ -300,6 +303,74 @@ Is this split realistic given my actual spending patterns? What would you adjust
               </p>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Subscriptions */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle>Fixed Subscriptions</CardTitle>
+            <Link
+              to="/subscriptions"
+              className="text-xs text-[var(--color-primary)] hover:underline"
+            >
+              Manage →
+            </Link>
+          </div>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Monthly recurring costs pulled from your Subscriptions tab.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {subscriptions.length === 0 ? (
+            <div className="flex items-center justify-center py-6 text-sm text-[var(--color-text-muted)]">
+              No subscriptions tracked yet.{" "}
+              <Link to="/subscriptions" className="ml-1 text-[var(--color-primary)] hover:underline">
+                Add one
+              </Link>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {/* Per-subscription rows */}
+              <div className="flex flex-col gap-1">
+                {subscriptions.map((sub) => (
+                  <div key={sub.id} className="flex items-center justify-between text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[var(--color-text)]">{sub.name}</span>
+                      {sub.category && (
+                        <Badge variant="default" className="text-[10px]">{sub.category}</Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 text-right">
+                      <span className="text-xs text-[var(--color-text-muted)]">
+                        {sub.source_account_name ?? "—"}
+                      </span>
+                      <span className="tabular-nums font-medium">
+                        {formatCurrency(sub.amount)}
+                        <span className="ml-1 text-xs text-[var(--color-text-muted)] font-normal">
+                          /{sub.billing_cycle === "monthly" ? "mo" : sub.billing_cycle === "yearly" ? "yr" : sub.billing_cycle === "quarterly" ? "qtr" : "wk"}
+                        </span>
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Total row */}
+              <div className="flex items-center justify-between border-t border-[var(--color-border)] pt-3">
+                <div>
+                  <p className="text-sm font-semibold">Total / month</p>
+                  {monthlyIncome > 0 && (
+                    <p className="text-xs text-[var(--color-text-muted)]">
+                      {Math.round((totalSubMonthly / monthlyIncome) * 100)}% of income
+                    </p>
+                  )}
+                </div>
+                <p className="text-lg font-bold tabular-nums">{formatCurrency(totalSubMonthly)}</p>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 
