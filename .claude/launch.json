@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "milly-maker-web",
+      "runtimeExecutable": "/bin/zsh",
+      "runtimeArgs": ["-l", "-c", "cd /Users/jeffrey.delosreyes/milly-maker && pnpm --filter web dev"],
+      "port": 5173
+    }
+  ]
+}
