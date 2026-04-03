@@ -1,7 +1,7 @@
 import React, { useState } from "react";
-import { Eye, EyeOff, Download, Upload, Sparkles } from "lucide-react";
+import { Eye, EyeOff, Download, Upload, Sparkles, Trash2 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, Input } from "@milly-maker/ui";
-import { getDb } from "@/db/init.js";
+import { getDb, resetDatabase } from "@/db/init.js";
 import { useDb } from "@/db/hooks/useDb.js";
 import { seedDatabase } from "@/db/seed.js";
 
@@ -14,6 +14,8 @@ export function SettingsPage() {
   const [importError, setImportError] = useState<string | null>(null);
   const [seeding, setSeeding] = useState(false);
   const [seedDone, setSeedDone] = useState(false);
+  const [resetConfirm, setResetConfirm] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   function handleSaveKey() {
     if (apiKey.trim()) {
@@ -54,6 +56,19 @@ export function SettingsPage() {
     } catch (err) {
       console.error("Seed failed:", err);
       setSeeding(false);
+    }
+  }
+
+  async function handleReset() {
+    setResetting(true);
+    try {
+      await resetDatabase();
+      localStorage.removeItem("planningSettings");
+      window.location.reload();
+    } catch (err) {
+      console.error("Reset failed:", err);
+      setResetting(false);
+      setResetConfirm(false);
     }
   }
 
@@ -167,6 +182,47 @@ export function SettingsPage() {
           <p className="text-xs text-[var(--color-danger)]/70">
             ⚠ This adds data on top of whatever already exists. Best used on a fresh database.
           </p>
+        </CardContent>
+      </Card>
+
+      {/* Reset data */}
+      <Card>
+        <CardHeader><CardTitle>Reset Data</CardTitle></CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            Wipe all data and start fresh. This deletes the local database file and cannot be undone.
+          </p>
+          {!resetConfirm ? (
+            <button
+              onClick={() => setResetConfirm(true)}
+              className="flex w-fit items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-danger)]/40 px-4 py-2 text-sm font-medium text-[var(--color-danger)] hover:bg-[var(--color-danger)]/8 transition-colors"
+            >
+              <Trash2 size={14} /> Reset all data…
+            </button>
+          ) : (
+            <div className="flex flex-col gap-3">
+              <p className="text-sm font-medium text-[var(--color-danger)]">
+                Are you sure? This will permanently delete all your transactions, accounts, and settings.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => void handleReset()}
+                  disabled={resetting}
+                  className="flex items-center gap-2 rounded-[var(--radius-sm)] bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50 transition-opacity"
+                >
+                  <Trash2 size={14} />
+                  {resetting ? "Resetting…" : "Yes, delete everything"}
+                </button>
+                <button
+                  onClick={() => setResetConfirm(false)}
+                  disabled={resetting}
+                  className="rounded-[var(--radius-sm)] border border-[var(--color-border)] px-4 py-2 text-sm font-medium text-[var(--color-text-muted)] hover:bg-[var(--color-surface-raised)] transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 

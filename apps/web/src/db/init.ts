@@ -119,3 +119,19 @@ export function getDb(): duckdb.AsyncDuckDB {
   if (!_db) throw new Error("DuckDB not initialized");
   return _db;
 }
+
+export async function resetDatabase(): Promise<void> {
+  // Close connection and terminate worker so OPFS file lock is released
+  if (_conn) { try { await _conn.close(); } catch { /* ignore */ } }
+  if (_db)   { try { await _db.terminate(); } catch { /* ignore */ } }
+  _conn = null;
+  _db = null;
+
+  // Delete all DB files from OPFS
+  if (opfsSupported) {
+    const root = await navigator.storage.getDirectory();
+    for (const name of ["milly-maker.db", "milly-maker.db.wal", "milly-maker.db.shm"]) {
+      try { await root.removeEntry(name); } catch { /* may not exist */ }
+    }
+  }
+}

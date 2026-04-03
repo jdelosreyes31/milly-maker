@@ -268,7 +268,7 @@ export async function getCheckingBalanceSummary(
     FROM checking_accounts a
     LEFT JOIN checking_transactions t ON t.account_id = a.id
     WHERE a.is_active = true
-    GROUP BY a.id, a.name, a.starting_balance
+    GROUP BY a.id, a.name, a.starting_balance, a.created_at
     ORDER BY a.created_at ASC
   `);
   return result.toArray() as unknown as { account_id: string; account_name: string; current_balance: number }[];

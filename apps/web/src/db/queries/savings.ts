@@ -218,7 +218,7 @@ export async function getSavingsBalanceSummary(
     FROM savings_accounts a
     LEFT JOIN savings_transactions t ON t.account_id = a.id
     WHERE a.is_active = true
-    GROUP BY a.id, a.name, a.account_type, a.apr, a.starting_balance
+    GROUP BY a.id, a.name, a.account_type, a.apr, a.starting_balance, a.created_at
     ORDER BY a.created_at ASC
   `);
   return result.toArray() as unknown as {

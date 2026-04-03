@@ -115,12 +115,14 @@ export async function seedDatabase(conn: AsyncDuckDBConnection): Promise<void> {
     VALUES (${q(inv3)}, 'Taxable Brokerage', 'brokerage', 9200.00, 200.00, true)
   `);
   // Net worth snapshots for the chart
-  const baseNW = 52000 + 14800 + 9200 + 6500 + 3500 - 4200 - 21500;
+  const totalDebts = 4200 + 21500;
+  const baseAssets = 52000 + 14800 + 9200 + 6500 + 3500;
   for (let m = 5; m >= 0; m--) {
-    const nw = Math.round(baseNW - m * 1800 + Math.random() * 400);
+    const assets = Math.round(baseAssets - m * 1800 + Math.random() * 400);
     await conn.query(`
-      INSERT OR IGNORE INTO net_worth_snapshots (snapshot_date, total_assets, total_debts, net_worth)
-      VALUES (${q(monthsAgo(m, 1))}, ${nw + 4200 + 21500}, 25700, ${nw})
+      INSERT INTO net_worth_snapshots (id, snapshot_date, total_assets, total_debts)
+      VALUES (${q(nanoid())}, ${q(monthsAgo(m, 1))}, ${assets}, ${totalDebts})
+      ON CONFLICT (snapshot_date) DO NOTHING
     `);
   }
 
