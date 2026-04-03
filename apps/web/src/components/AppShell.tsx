@@ -10,6 +10,7 @@ import {
   TrendingUp,
   BarChart3,
   BookOpen,
+  FileBarChart2,
   Settings,
   MessageSquare,
   ChevronLeft,
@@ -28,6 +29,7 @@ const NAV_ITEMS = [
   { to: "/debts",       label: "Debts",       icon: CreditCard },
   { to: "/investments", label: "Investments", icon: TrendingUp },
   { to: "/forecast",    label: "Forecast",    icon: BarChart3 },
+  { to: "/reports",     label: "Reports",     icon: FileBarChart2 },
   { to: "/planning",    label: "Planning",    icon: BookOpen },
 ];
 

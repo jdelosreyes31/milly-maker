@@ -14,6 +14,7 @@ import { ForecastPage } from "@/features/forecast/ForecastPage.js";
 import { SavingsPage } from "@/features/savings/SavingsPage.js";
 import { FantasyPage } from "@/features/fantasy/FantasyPage.js";
 import { PlanningPage } from "@/features/planning/PlanningPage.js";
+import { ReportsPage } from "@/features/reports/ReportsPage.js";
 import { SubscriptionsPage } from "@/features/subscriptions/SubscriptionsPage.js";
 import { SettingsPage } from "@/features/settings/SettingsPage.js";
 
@@ -36,6 +37,7 @@ const savingsRoute   = createRoute({ getParentRoute: () => rootRoute, path: "/sa
 const fantasyRoute   = createRoute({ getParentRoute: () => rootRoute, path: "/fantasy",  component: FantasyPage });
 const planningRoute       = createRoute({ getParentRoute: () => rootRoute, path: "/planning",       component: PlanningPage });
 const subscriptionsRoute  = createRoute({ getParentRoute: () => rootRoute, path: "/subscriptions",  component: SubscriptionsPage });
+const reportsRoute        = createRoute({ getParentRoute: () => rootRoute, path: "/reports",        component: ReportsPage });
 const settingsRoute       = createRoute({ getParentRoute: () => rootRoute, path: "/settings",       component: SettingsPage });
 
 const routeTree = rootRoute.addChildren([
@@ -48,6 +50,7 @@ const routeTree = rootRoute.addChildren([
   investmentsRoute,
   forecastRoute,
   planningRoute,
+  reportsRoute,
   settingsRoute,
 ]);
 
