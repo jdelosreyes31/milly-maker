@@ -1,164 +1,47 @@
 import React, { useEffect, useState, useMemo } from "react";
+import {
+  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, ReferenceLine, Legend,
+  AreaChart, Area,
+} from "recharts";
 import { Card, CardContent, CardHeader, CardTitle, formatCurrency } from "@milly-maker/ui";
 import { useDb } from "@/db/hooks/useDb.js";
-import { useSubscriptions } from "@/db/hooks/useSubscriptions.js";
-import { useDebts } from "@/db/hooks/useDebts.js";
-import { getMonthlyCreditTotals } from "@/db/queries/checking.js";
-import { loadPlanningSettings } from "@/features/planning/PlanningPage.js";
+import { getMonthlyCreditTotals, getMonthlyDebitTotals } from "@/db/queries/checking.js";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-interface FlowCategory {
-  name: string;
-  amount: number;
-  color: string;
-  pct: number; // % of income
+function fmtMonth(ym: string) {
+  const [y, m] = ym.split("-");
+  return new Date(Number(y), Number(m) - 1, 1).toLocaleString("default", { month: "short", year: "2-digit" });
 }
 
-// ── Custom Sankey SVG ─────────────────────────────────────────────────────────
+const TOOLTIP_STYLE = {
+  backgroundColor: "var(--color-surface)",
+  border: "1px solid var(--color-border)",
+  borderRadius: "6px",
+  fontSize: "12px",
+  fontFamily: "Lora, serif",
+};
 
-function PaycheckSankey({
-  income,
-  categories,
-}: {
-  income: number;
-  categories: FlowCategory[];
-}) {
-  const H = 300;
-  const leftX = 0;
-  const leftW = 56;
-  const rightX = 300;
-  const rightW = 56;
-  const viewW = rightX + rightW + 180; // extra room for labels
+// ── Custom tooltip ────────────────────────────────────────────────────────────
 
-  // Stack right-side segments proportionally
-  let cursor = 0;
-  const segs = categories.map((cat) => {
-    const h = income > 0 ? Math.max((cat.amount / income) * H, cat.amount > 0 ? 4 : 0) : 0;
-    const seg = { ...cat, y: cursor, h };
-    cursor += h;
-    return seg;
-  });
-
-  // Left side mirrors same stacking (no crossing paths)
-  let leftCursor = 0;
-  const paths = segs.map((seg) => {
-    const lh = seg.h;
-    const ly = leftCursor;
-    leftCursor += lh;
-
-    if (seg.h < 1) return null;
-
-    const x1 = leftX + leftW;
-    const x2 = rightX;
-    const cx = (x1 + x2) / 2;
-
-    return {
-      d: [
-        `M ${x1} ${ly}`,
-        `C ${cx} ${ly}, ${cx} ${seg.y}, ${x2} ${seg.y}`,
-        `L ${x2} ${seg.y + seg.h}`,
-        `C ${cx} ${seg.y + seg.h}, ${cx} ${ly + lh}, ${x1} ${ly + lh}`,
-        `Z`,
-      ].join(" "),
-      color: seg.color,
-      name: seg.name,
-      amount: seg.amount,
-      pct: seg.pct,
-      midY: seg.y + seg.h / 2,
-    };
-  });
-
+function CashFlowTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  const income   = payload.find((p: any) => p.dataKey === "income")?.value ?? 0;
+  const expenses = payload.find((p: any) => p.dataKey === "expenses")?.value ?? 0;
+  const net      = income - expenses;
   return (
-    <svg
-      viewBox={`0 0 ${viewW} ${H}`}
-      className="w-full"
-      style={{ maxHeight: 320, overflow: "visible" }}
-    >
-      {/* Left: Paycheck column */}
-      <rect x={leftX} y={0} width={leftW} height={H} fill="#a85c2e" rx={4} />
-      <text
-        x={leftX + leftW / 2}
-        y={H / 2 - 8}
-        textAnchor="middle"
-        dominantBaseline="middle"
-        fill="#fdf8f2"
-        fontSize={10}
-        fontFamily="Lora, serif"
-        fontWeight="500"
+    <div style={TOOLTIP_STYLE} className="px-3 py-2 flex flex-col gap-1">
+      <p className="font-semibold text-[var(--color-text)] mb-1">{label}</p>
+      <p className="text-[var(--color-chart-2)]">Income:&nbsp;&nbsp;&nbsp;{formatCurrency(income)}</p>
+      <p className="text-[var(--color-chart-1)]">Expenses: {formatCurrency(expenses)}</p>
+      <p
+        className="border-t border-[var(--color-border-subtle)] pt-1 mt-1 font-medium"
+        style={{ color: net >= 0 ? "var(--color-success)" : "var(--color-danger)" }}
       >
-        Paycheck
-      </text>
-      <text
-        x={leftX + leftW / 2}
-        y={H / 2 + 8}
-        textAnchor="middle"
-        dominantBaseline="middle"
-        fill="#fdf8f2"
-        fontSize={9}
-        fontFamily="DM Mono, monospace"
-      >
-        {income > 0 ? formatCurrency(income) : "—"}
-      </text>
-
-      {/* Flow paths */}
-      {paths.map(
-        (p, i) =>
-          p && (
-            <path
-              key={i}
-              d={p.d}
-              fill={p.color}
-              opacity={0.35}
-            />
-          )
-      )}
-
-      {/* Right: Category columns */}
-      {segs.map((seg, i) =>
-        seg.h >= 1 ? (
-          <rect
-            key={i}
-            x={rightX}
-            y={seg.y}
-            width={rightW}
-            height={seg.h}
-            fill={seg.color}
-            rx={2}
-          />
-        ) : null
-      )}
-
-      {/* Right labels */}
-      {paths.map(
-        (p, i) =>
-          p && segs[i]!.h >= 8 && (
-            <g key={i}>
-              <text
-                x={rightX + rightW + 10}
-                y={p.midY - 5}
-                dominantBaseline="middle"
-                fill="#28200e"
-                fontSize={10}
-                fontFamily="Lora, serif"
-              >
-                {p.name}
-              </text>
-              <text
-                x={rightX + rightW + 10}
-                y={p.midY + 7}
-                dominantBaseline="middle"
-                fill="#7a6850"
-                fontSize={9}
-                fontFamily="DM Mono, monospace"
-              >
-                {formatCurrency(p.amount)}{" "}
-                <tspan fill="#a89878">({p.pct.toFixed(0)}%)</tspan>
-              </text>
-            </g>
-          )
-      )}
-    </svg>
+        Net: {net >= 0 ? "+" : ""}{formatCurrency(net)}
+      </p>
+    </div>
   );
 }
 
@@ -166,126 +49,182 @@ function PaycheckSankey({
 
 export function ReportsPage() {
   const { conn } = useDb();
-  const { totalMonthly: subTotal } = useSubscriptions();
-  const { totalMinPayment: debtMin } = useDebts();
-  const [monthlyCredits, setMonthlyCredits] = useState<{ month: string; total: number }[]>([]);
+  const [credits, setCredits] = useState<{ month: string; total: number }[]>([]);
+  const [debits,  setDebits]  = useState<{ month: string; total: number }[]>([]);
 
   useEffect(() => {
     if (!conn) return;
-    void getMonthlyCreditTotals(conn).then(setMonthlyCredits);
+    void Promise.all([
+      getMonthlyCreditTotals(conn),
+      getMonthlyDebitTotals(conn),
+    ]).then(([c, d]) => { setCredits(c); setDebits(d); });
   }, [conn]);
 
-  const settings = useMemo(() => loadPlanningSettings(), []);
+  // Merge into unified monthly rows, sorted chronologically
+  const monthlyData = useMemo(() => {
+    const map = new Map<string, { income: number; expenses: number }>();
+    for (const c of credits) map.set(c.month, { income: c.total, expenses: 0 });
+    for (const d of debits) {
+      const row = map.get(d.month) ?? { income: 0, expenses: 0 };
+      row.expenses = d.total;
+      map.set(d.month, row);
+    }
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([month, { income, expenses }]) => ({
+        month: fmtMonth(month),
+        income:   Math.round(income * 100) / 100,
+        expenses: Math.round(expenses * 100) / 100,
+        net:      Math.round((income - expenses) * 100) / 100,
+      }));
+  }, [credits, debits]);
 
-  const autoIncome = useMemo(() => {
-    const last3 = monthlyCredits.slice(-3);
-    if (last3.length === 0) return 0;
-    return Math.round(last3.reduce((s, c) => s + c.total, 0) / last3.length);
-  }, [monthlyCredits]);
+  // Cumulative net cash flow
+  const cumulativeData = useMemo(() => {
+    let running = 0;
+    return monthlyData.map((d) => {
+      running += d.net;
+      return { month: d.month, cumulative: Math.round(running * 100) / 100 };
+    });
+  }, [monthlyData]);
 
-  const income = settings.incomeOverride ?? autoIncome;
+  // Summary stats
+  const stats = useMemo(() => {
+    if (monthlyData.length === 0) return null;
+    const n = monthlyData.length;
+    const avgIncome   = monthlyData.reduce((s, d) => s + d.income, 0) / n;
+    const avgExpenses = monthlyData.reduce((s, d) => s + d.expenses, 0) / n;
+    const avgNet      = avgIncome - avgExpenses;
+    const totalNet    = monthlyData.reduce((s, d) => s + d.net, 0);
+    const posMonths   = monthlyData.filter((d) => d.net > 0).length;
+    return { avgIncome, avgExpenses, avgNet, totalNet, posMonths, n };
+  }, [monthlyData]);
 
-  // After fixed costs, split the remainder using planning percentages
-  const fixed = subTotal + debtMin;
-  const remaining = Math.max(0, income - fixed);
-  const totalPct = settings.needsPct + settings.wantsPct + settings.savingsPct;
-  const safePct = totalPct > 0 ? totalPct : 100;
-
-  const savingsAmt  = Math.round((remaining * settings.savingsPct) / safePct);
-  const needsAmt    = Math.round((remaining * settings.needsPct)   / safePct);
-  const wantsAmt    = Math.round((remaining * settings.wantsPct)   / safePct);
-  const unallocated = Math.max(0, remaining - savingsAmt - needsAmt - wantsAmt);
-
-  const categories: FlowCategory[] = [
-    { name: "Subscriptions",  amount: subTotal,    color: "#a84040", pct: income > 0 ? (subTotal / income) * 100 : 0 },
-    { name: "Debt Minimums",  amount: debtMin,     color: "#7a5090", pct: income > 0 ? (debtMin  / income) * 100 : 0 },
-    { name: "Savings",        amount: savingsAmt,  color: "#597a38", pct: income > 0 ? (savingsAmt  / income) * 100 : 0 },
-    { name: "Needs",          amount: needsAmt,    color: "#3a688a", pct: income > 0 ? (needsAmt    / income) * 100 : 0 },
-    { name: "Wants",          amount: wantsAmt,    color: "#b08828", pct: income > 0 ? (wantsAmt    / income) * 100 : 0 },
-    ...(unallocated > 0
-      ? [{ name: "Unallocated", amount: unallocated, color: "#a89878", pct: income > 0 ? (unallocated / income) * 100 : 0 }]
-      : []),
-  ].filter((c) => c.amount > 0);
-
-  const hasData = income > 0;
+  const hasData = monthlyData.length > 0;
 
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-xl font-semibold">Reports</h1>
 
-      {/* Paycheck Flow */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Paycheck Flow</CardTitle>
-          <p className="text-xs text-[var(--color-text-muted)]">
-            Where each dollar goes — fixed costs deducted first, remainder split by your planning percentages.
-            {settings.incomeOverride !== null
-              ? " Using manual income override."
-              : " Income auto-detected from last 3 months of credits."}
-          </p>
-        </CardHeader>
-        <CardContent>
-          {!hasData ? (
-            <div className="flex h-40 items-center justify-center text-sm text-[var(--color-text-muted)]">
-              Add income credits in Checking (or set a manual override in Planning) to see your paycheck flow.
-            </div>
-          ) : (
-            <div className="flex flex-col gap-6">
-              <PaycheckSankey income={income} categories={categories} />
+      {!hasData ? (
+        <Card>
+          <CardContent className="flex h-40 items-center justify-center text-sm text-[var(--color-text-muted)]">
+            Add transactions in Checking to see your cash flow analysis.
+          </CardContent>
+        </Card>
+      ) : (
+        <>
+          {/* Summary stat cards */}
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            {[
+              { label: "Avg Monthly Income",   value: stats!.avgIncome,   color: "var(--color-success)" },
+              { label: "Avg Monthly Spending",  value: stats!.avgExpenses, color: "var(--color-danger)"  },
+              { label: "Avg Net Cash Flow",     value: stats!.avgNet,      color: stats!.avgNet >= 0 ? "var(--color-success)" : "var(--color-danger)" },
+              { label: "Total Net (all time)",  value: stats!.totalNet,    color: stats!.totalNet >= 0 ? "var(--color-success)" : "var(--color-danger)" },
+            ].map(({ label, value, color }) => (
+              <div
+                key={label}
+                className="rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+                style={{ borderLeftWidth: 3, borderLeftColor: color }}
+              >
+                <p className="text-xs text-[var(--color-text-muted)] mb-1">{label}</p>
+                <p className="text-xl font-semibold tabular-nums" style={{ color }}>
+                  {value >= 0 ? "" : "–"}{formatCurrency(Math.abs(value))}
+                </p>
+              </div>
+            ))}
+          </div>
 
-              {/* Breakdown table */}
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-[var(--color-border)] text-left text-xs text-[var(--color-text-muted)]">
-                    <th className="pb-2 font-medium">Category</th>
-                    <th className="pb-2 font-medium">Type</th>
-                    <th className="pb-2 font-medium text-right">Amount / mo</th>
-                    <th className="pb-2 font-medium text-right">% of income</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {categories.map((cat) => (
-                    <tr key={cat.name} className="border-b border-[var(--color-border-subtle)] last:border-0">
-                      <td className="py-2.5">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className="h-2.5 w-2.5 rounded-sm flex-shrink-0"
-                            style={{ backgroundColor: cat.color }}
-                          />
-                          {cat.name}
-                        </div>
-                      </td>
-                      <td className="py-2.5 text-[var(--color-text-muted)]">
-                        {cat.name === "Subscriptions" || cat.name === "Debt Minimums"
-                          ? "Fixed"
-                          : cat.name === "Unallocated"
-                          ? "Buffer"
-                          : "Discretionary"}
-                      </td>
-                      <td className="py-2.5 text-right tabular-nums font-medium">
-                        {formatCurrency(cat.amount)}
-                      </td>
-                      <td className="py-2.5 text-right tabular-nums text-[var(--color-text-muted)]">
-                        {cat.pct.toFixed(1)}%
-                      </td>
-                    </tr>
-                  ))}
-                  {/* Total row */}
-                  <tr className="border-t-2 border-[var(--color-border)]">
-                    <td className="pt-3 font-semibold" colSpan={2}>Total</td>
-                    <td className="pt-3 text-right tabular-nums font-semibold">
-                      {formatCurrency(income)}
-                    </td>
-                    <td className="pt-3 text-right tabular-nums text-[var(--color-text-muted)]">
-                      100%
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+          {/* Monthly cash flow bar + net line */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Monthly Cash Flow</CardTitle>
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Income vs spending per month.
+                Positive net months: {stats!.posMonths} of {stats!.n}.
+              </p>
+            </CardHeader>
+            <CardContent>
+              <ResponsiveContainer width="100%" height={260}>
+                <ComposedChart data={monthlyData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-subtle)" />
+                  <XAxis
+                    dataKey="month"
+                    tick={{ fontSize: 11, fill: "var(--color-text-subtle)", fontFamily: "DM Mono, monospace" }}
+                  />
+                  <YAxis
+                    tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`}
+                    tick={{ fontSize: 11, fill: "var(--color-text-subtle)", fontFamily: "DM Mono, monospace" }}
+                  />
+                  <Tooltip content={<CashFlowTooltip />} />
+                  <Legend
+                    iconType="square"
+                    iconSize={10}
+                    wrapperStyle={{ fontSize: 12, fontFamily: "Lora, serif", paddingTop: 8 }}
+                  />
+                  <ReferenceLine y={0} stroke="var(--color-border)" strokeWidth={1.5} />
+                  <Bar dataKey="income"   name="Income"   fill="var(--color-chart-2)" radius={[3, 3, 0, 0]} maxBarSize={32} opacity={0.85} />
+                  <Bar dataKey="expenses" name="Spending" fill="var(--color-chart-1)" radius={[3, 3, 0, 0]} maxBarSize={32} opacity={0.85} />
+                  <Line
+                    dataKey="net"
+                    name="Net"
+                    type="monotone"
+                    stroke="var(--color-text-muted)"
+                    strokeWidth={2}
+                    dot={{ r: 3, fill: "var(--color-surface)", stroke: "var(--color-text-muted)", strokeWidth: 2 }}
+                    strokeDasharray="4 3"
+                  />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
+
+          {/* Cumulative net */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Cumulative Net Cash Flow</CardTitle>
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Running total of income minus spending. A rising line means you're consistently saving.
+              </p>
+            </CardHeader>
+            <CardContent>
+              <ResponsiveContainer width="100%" height={200}>
+                <AreaChart data={cumulativeData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="cumGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor="var(--color-chart-2)" stopOpacity={0.25} />
+                      <stop offset="95%" stopColor="var(--color-chart-2)" stopOpacity={0}    />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-subtle)" />
+                  <XAxis
+                    dataKey="month"
+                    tick={{ fontSize: 11, fill: "var(--color-text-subtle)", fontFamily: "DM Mono, monospace" }}
+                  />
+                  <YAxis
+                    tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`}
+                    tick={{ fontSize: 11, fill: "var(--color-text-subtle)", fontFamily: "DM Mono, monospace" }}
+                  />
+                  <Tooltip
+                    formatter={(v: number) => [formatCurrency(v), "Cumulative Net"]}
+                    contentStyle={TOOLTIP_STYLE}
+                  />
+                  <ReferenceLine y={0} stroke="var(--color-border)" strokeWidth={1.5} />
+                  <Area
+                    type="monotone"
+                    dataKey="cumulative"
+                    name="Cumulative Net"
+                    stroke="var(--color-chart-2)"
+                    fill="url(#cumGrad)"
+                    strokeWidth={2}
+                    dot={{ r: 3, fill: "var(--color-surface)", stroke: "var(--color-chart-2)", strokeWidth: 2 }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
+        </>
+      )}
     </div>
   );
 }
