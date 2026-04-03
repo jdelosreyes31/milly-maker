@@ -1,14 +1,19 @@
 import React, { useState } from "react";
-import { Eye, EyeOff, Download, Upload } from "lucide-react";
+import { Eye, EyeOff, Download, Upload, Sparkles } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, Input } from "@milly-maker/ui";
 import { getDb } from "@/db/init.js";
+import { useDb } from "@/db/hooks/useDb.js";
+import { seedDatabase } from "@/db/seed.js";
 
 export function SettingsPage() {
+  const { conn } = useDb();
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("anthropicApiKey") ?? "");
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  const [seeding, setSeeding] = useState(false);
+  const [seedDone, setSeedDone] = useState(false);
 
   function handleSaveKey() {
     if (apiKey.trim()) {
@@ -36,6 +41,19 @@ export function SettingsPage() {
       console.error("Export failed:", err);
     } finally {
       setExporting(false);
+    }
+  }
+
+  async function handleSeed() {
+    if (!conn) return;
+    setSeeding(true);
+    try {
+      await seedDatabase(conn);
+      setSeedDone(true);
+      setTimeout(() => window.location.reload(), 800);
+    } catch (err) {
+      console.error("Seed failed:", err);
+      setSeeding(false);
     }
   }
 
@@ -117,6 +135,37 @@ export function SettingsPage() {
           )}
           <p className="text-xs text-[var(--color-text-subtle)]">
             ⚠ Importing will overwrite all current data and reload the page.
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* Demo data */}
+      <Card>
+        <CardHeader><CardTitle>Demo Data</CardTitle></CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            Populate the app with realistic sample data — checking, savings, subscriptions, debts, investments, and fantasy accounts — so you can explore all the tabs before entering your own numbers.
+          </p>
+          <ul className="text-xs text-[var(--color-text-subtle)] list-disc list-inside space-y-1">
+            <li>6 months of paycheck + spending history in Checking</li>
+            <li>Marcus HYSA with monthly deposits &amp; interest</li>
+            <li>7 subscriptions (Netflix, Spotify, gym, etc.)</li>
+            <li>Credit card + student loan debts</li>
+            <li>401(k), Roth IRA, and brokerage investments</li>
+            <li>DraftKings, FanDuel DFS, and a fantasy league season</li>
+          </ul>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => void handleSeed()}
+              disabled={seeding || seedDone}
+              className="flex items-center gap-2 rounded-[var(--radius-sm)] bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-[var(--color-primary-foreground)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50 transition-colors"
+            >
+              <Sparkles size={14} />
+              {seedDone ? "Done — reloading…" : seeding ? "Generating…" : "Generate Seed Data"}
+            </button>
+          </div>
+          <p className="text-xs text-[var(--color-danger)]/70">
+            ⚠ This adds data on top of whatever already exists. Best used on a fresh database.
           </p>
         </CardContent>
       </Card>
