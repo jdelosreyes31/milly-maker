@@ -6,6 +6,13 @@ import schema004 from "./004_fantasy.sql?raw";
 import schema005 from "./005_fantasy_amendments.sql?raw";
 import schema006 from "./006_subscriptions.sql?raw";
 import schema007 from "./007_investment_holdings.sql?raw";
+import schema008 from "./008_debt_log.sql?raw";
+import schema009 from "./009_fantasy_funding.sql?raw";
+import schema010 from "./010_checking_category.sql?raw";
+import schema011 from "./011_fantasy_contests.sql?raw";
+import schema012 from "./012_fantasy_bet_sessions.sql?raw";
+import schema013 from "./013_link_fantasy_tx.sql?raw";
+import schema014 from "./014_bet_session_open.sql?raw";
 
 const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "001_initial_schema", sql: schema001 },
@@ -15,6 +22,13 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "005_fantasy_amendments", sql: schema005 },
   { name: "006_subscriptions", sql: schema006 },
   { name: "007_investment_holdings", sql: schema007 },
+  { name: "008_debt_log", sql: schema008 },
+  { name: "009_fantasy_funding", sql: schema009 },
+  { name: "010_checking_category", sql: schema010 },
+  { name: "011_fantasy_contests", sql: schema011 },
+  { name: "012_fantasy_bet_sessions", sql: schema012 },
+  { name: "013_link_fantasy_tx", sql: schema013 },
+  { name: "014_bet_session_open", sql: schema014 },
 ];
 
 export async function runMigrations(conn: AsyncDuckDBConnection): Promise<void> {

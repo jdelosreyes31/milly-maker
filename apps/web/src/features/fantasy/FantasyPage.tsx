@@ -2,7 +2,7 @@ import React, { useState, useMemo } from "react";
 import {
   Plus, Trash2, ChevronDown, ChevronRight,
   ArrowDownLeft, ArrowUpRight,
-  Check, X, Minus, Settings2, Trophy, TrendingUp,
+  Check, X, Minus, Settings2, Trophy, TrendingUp, Link2, ClipboardList, Dices,
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line,
@@ -13,10 +13,15 @@ import {
   Button, Card, CardContent, CardHeader, CardTitle,
   Dialog, Input, Select, Badge, formatCurrency, cn,
 } from "@milly-maker/ui";
-import { useFantasyAccounts, useFantasyData } from "@/db/hooks/useFantasy.js";
+import { useFantasyAccounts, useFantasyData, useFantasyLinks } from "@/db/hooks/useFantasy.js";
+import { useCheckingAccounts } from "@/db/hooks/useChecking.js";
+import { useSavingsAccounts } from "@/db/hooks/useSavings.js";
+import { useDb } from "@/db/hooks/useDb.js";
+import { insertTransaction } from "@/db/queries/checking.js";
+import { insertSavingsTransaction } from "@/db/queries/savings.js";
 import type {
   FantasyPlatformType, FantasyTxType,
-  FutureStatus, SeasonStatus,
+  FutureStatus, SeasonStatus, FantasyContest, FantasyBetSession,
 } from "@/db/queries/fantasy.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -156,11 +161,14 @@ interface TxFormState {
   description: string;
   transaction_date: string;
   notes: string;
+  from_source: boolean;
+  source_account_id: string; // "checking:{id}" | "savings:{id}"
 }
 
 const EMPTY_TX: TxFormState = {
   type: "deposit", amount: "", description: "",
   transaction_date: new Date().toISOString().slice(0, 10), notes: "",
+  from_source: false, source_account_id: "",
 };
 
 // ── Future dialog ──────────────────────────────────────────────────────────────
@@ -509,10 +517,346 @@ function SeasonsAccordion({ seasons, showAll, onSettle, onRemove, showAccountCol
   );
 }
 
+// ── Bet session dialog ────────────────────────────────────────────────────────
+
+interface BetSessionFormState {
+  session_date: string;
+  total_bet: string;
+  notes: string;
+}
+
+const EMPTY_BET_SESSION: BetSessionFormState = {
+  session_date: new Date().toISOString().slice(0, 10),
+  total_bet: "", notes: "",
+};
+
+interface BetSessionDialogProps {
+  open: boolean;
+  onClose: () => void;
+  accountId: string;
+  onSave: (data: {
+    account_id: string; session_date: string;
+    total_bet: number; notes?: string;
+  }) => Promise<void>;
+}
+
+function BetSessionDialog({ open, onClose, accountId, onSave }: BetSessionDialogProps) {
+  const [form, setForm] = useState<BetSessionFormState>(EMPTY_BET_SESSION);
+  const [errors, setErrors] = useState<Partial<BetSessionFormState>>({});
+  const [saving, setSaving] = useState(false);
+
+  React.useEffect(() => {
+    if (open) { setForm(EMPTY_BET_SESSION); setErrors({}); }
+  }, [open]);
+
+  const bet = Number(form.total_bet);
+
+  const f = (k: keyof BetSessionFormState, v: string) =>
+    setForm((prev) => ({ ...prev, [k]: v }));
+
+  async function handleSave() {
+    const e: Partial<BetSessionFormState> = {};
+    if (!form.session_date) e.session_date = "Required";
+    if (form.total_bet === "" || isNaN(bet) || bet < 0) e.total_bet = "Enter a valid amount";
+    setErrors(e);
+    if (Object.keys(e).length > 0) return;
+    setSaving(true);
+    await onSave({
+      account_id: accountId,
+      session_date: form.session_date,
+      total_bet: bet,
+      notes: form.notes.trim() || undefined,
+    });
+    setSaving(false);
+    onClose();
+  }
+
+
+  return (
+    <Dialog open={open} onClose={onClose} title="Log Bet Result">
+      <div className="flex flex-col gap-4">
+        <Input label="Session Date" type="date" value={form.session_date}
+          onChange={(e) => f("session_date", e.target.value)} error={errors.session_date} />
+        <Input label="Total Bet ($)" type="number" step="0.01" min="0" placeholder="105.00"
+          value={form.total_bet} onChange={(e) => f("total_bet", e.target.value)}
+          error={errors.total_bet} />
+        <Input label="Notes (optional)" placeholder="e.g. Sunday NFL slate"
+          value={form.notes} onChange={(e) => f("notes", e.target.value)} />
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button size="sm" onClick={handleSave} disabled={saving}>
+            {saving ? "Saving…" : "Open Session"}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+// ── Settle bet session dialog ─────────────────────────────────────────────────
+
+interface SettleBetSessionDialogProps {
+  open: boolean;
+  onClose: () => void;
+  session: FantasyBetSession | null;
+  onSettle: (id: string, total_settled: number) => Promise<void>;
+}
+
+function SettleBetSessionDialog({ open, onClose, session, onSettle }: SettleBetSessionDialogProps) {
+  const [totalSettled, setTotalSettled] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  React.useEffect(() => {
+    if (open) { setTotalSettled(""); setError(""); }
+  }, [open]);
+
+  const settled = Number(totalSettled);
+  const net = totalSettled !== "" && !isNaN(settled) && session
+    ? Math.round((settled - session.total_bet) * 100) / 100
+    : null;
+
+  async function handleSettle() {
+    if (totalSettled === "" || isNaN(settled) || settled < 0) {
+      setError("Enter a valid amount"); return;
+    }
+    if (!session) return;
+    setSaving(true);
+    await onSettle(session.id, settled);
+    setSaving(false);
+    onClose();
+  }
+
+  return (
+    <Dialog open={open} onClose={onClose} title="Settle Bet Session">
+      {session && (
+        <div className="flex flex-col gap-4">
+          <div className="rounded-[var(--radius-sm)] bg-[var(--color-surface-raised)] px-3 py-2 text-sm">
+            <span className="text-[var(--color-text-muted)]">{formatDate(session.session_date)}</span>
+            <span className="mx-2 text-[var(--color-text-subtle)]">·</span>
+            <span className="font-medium">Bet: {formatCurrency(session.total_bet)}</span>
+            {session.notes && <span className="ml-2 text-xs text-[var(--color-text-subtle)]">{session.notes}</span>}
+          </div>
+          <Input label="Total Settled ($)" type="number" step="0.01" min="0" placeholder="125.00"
+            value={totalSettled} onChange={(e) => { setTotalSettled(e.target.value); setError(""); }}
+            error={error} />
+          {net !== null && (
+            <div className={cn(
+              "rounded-[var(--radius-sm)] px-3 py-2 text-sm font-medium",
+              net >= 0 ? "bg-[var(--color-success)]/10 text-[var(--color-success)]"
+                       : "bg-[var(--color-danger)]/10 text-[var(--color-danger)]"
+            )}>
+              Net: {net >= 0 ? "+" : ""}{formatCurrency(net)}
+              <span className="ml-1 font-normal opacity-75">— balance {net >= 0 ? "grows" : "drops"}</span>
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+            <Button size="sm" onClick={handleSettle} disabled={saving}>
+              {saving ? "Settling…" : "Settle"}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
+// ── Contest dialog ────────────────────────────────────────────────────────────
+
+interface ContestFormState {
+  description: string;
+  entry_fee: string;
+  contest_size: string;
+  placed_date: string;
+  finish_position: string;
+  winnings: string;
+  settled_date: string;
+  notes: string;
+}
+
+const EMPTY_CONTEST: ContestFormState = {
+  description: "", entry_fee: "", contest_size: "",
+  placed_date: new Date().toISOString().slice(0, 10),
+  finish_position: "", winnings: "", settled_date: "", notes: "",
+};
+
+interface ContestSaveData {
+  account_id: string; description: string; entry_fee: number;
+  contest_size?: number; finish_position?: number; winnings?: number;
+  placed_date: string; settled_date?: string; notes?: string;
+}
+
+interface ContestDialogProps {
+  open: boolean;
+  onClose: () => void;
+  accounts: { id: string; name: string; platform_type: FantasyPlatformType }[];
+  defaultAccountId: string;
+  onSave: (data: ContestSaveData) => Promise<void>;
+}
+
+function ContestDialog({ open, onClose, accounts, defaultAccountId, onSave }: ContestDialogProps) {
+  const [accountId, setAccountId] = useState(defaultAccountId);
+  const [form, setForm] = useState<ContestFormState>(EMPTY_CONTEST);
+  const [errors, setErrors] = useState<Partial<ContestFormState>>({});
+  const [saving, setSaving] = useState(false);
+
+  const sbAccounts = accounts.filter((a) => !isLeague(a.platform_type));
+  const accountOptions = sbAccounts.map((a) => ({ value: a.id, label: a.name }));
+
+  React.useEffect(() => {
+    if (open) {
+      setAccountId(defaultAccountId);
+      setForm(EMPTY_CONTEST);
+      setErrors({});
+    }
+  }, [open, defaultAccountId]);
+
+  async function handleSave() {
+    const e: Partial<ContestFormState> = {};
+    if (!form.description.trim()) e.description = "Required";
+    if (form.entry_fee === "" || isNaN(Number(form.entry_fee)) || Number(form.entry_fee) < 0)
+      e.entry_fee = "Enter a valid entry fee";
+    if (!form.placed_date) e.placed_date = "Required";
+    if (!accountId) e.description = "Select an account";
+    setErrors(e);
+    if (Object.keys(e).length > 0) return;
+
+    setSaving(true);
+    await onSave({
+      account_id: accountId,
+      description: form.description.trim(),
+      entry_fee: Number(form.entry_fee),
+      contest_size: form.contest_size ? Number(form.contest_size) : undefined,
+      finish_position: form.finish_position ? Number(form.finish_position) : undefined,
+      winnings: form.winnings !== "" ? Number(form.winnings) : undefined,
+      placed_date: form.placed_date,
+      settled_date: form.settled_date || undefined,
+      notes: form.notes.trim() || undefined,
+    });
+    setSaving(false);
+    onClose();
+  }
+
+  const f = (k: keyof ContestFormState, v: string) => setForm((prev) => ({ ...prev, [k]: v }));
+
+  return (
+    <Dialog open={open} onClose={onClose} title="Add Contest">
+      <div className="flex flex-col gap-4">
+        {accountOptions.length > 1 && (
+          <Select label="Account" options={accountOptions} value={accountId}
+            onChange={(e) => setAccountId(e.target.value)} />
+        )}
+        <Input label="Description" placeholder="e.g. NFL Sunday Millionaire Week 10"
+          value={form.description} onChange={(e) => f("description", e.target.value)}
+          error={errors.description} />
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Entry Fee ($)" type="number" step="0.01" min="0" placeholder="25.00"
+            value={form.entry_fee} onChange={(e) => f("entry_fee", e.target.value)}
+            error={errors.entry_fee} />
+          <Input label="Contest Size (# entrants, optional)" type="number" min="1" placeholder="150"
+            value={form.contest_size} onChange={(e) => f("contest_size", e.target.value)} />
+        </div>
+        <Input label="Date Played" type="date" value={form.placed_date}
+          onChange={(e) => f("placed_date", e.target.value)} error={errors.placed_date} />
+
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Results — fill in now or leave blank to settle later
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Finish Position (optional)" type="number" min="1" placeholder="42"
+            value={form.finish_position} onChange={(e) => f("finish_position", e.target.value)} />
+          <Input label="Winnings ($, optional)" type="number" step="0.01" min="0" placeholder="0.00"
+            value={form.winnings} onChange={(e) => f("winnings", e.target.value)} />
+        </div>
+        <Input label="Settled Date (optional)" type="date" value={form.settled_date}
+          onChange={(e) => f("settled_date", e.target.value)} />
+
+        <Input label="Notes (optional)" placeholder="Any context" value={form.notes}
+          onChange={(e) => f("notes", e.target.value)} />
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button size="sm" onClick={handleSave} disabled={saving}>{saving ? "Saving…" : "Add Contest"}</Button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+// ── Settle contest dialog ──────────────────────────────────────────────────────
+
+interface SettleContestDialogProps {
+  contest: FantasyContest | null;
+  onClose: () => void;
+  onSave: (id: string, data: { finish_position?: number; winnings: number; settled_date: string }) => Promise<void>;
+}
+
+function SettleContestDialog({ contest, onClose, onSave }: SettleContestDialogProps) {
+  const [finish, setFinish] = useState("");
+  const [winnings, setWinnings] = useState("");
+  const [settledDate, setSettledDate] = useState(new Date().toISOString().slice(0, 10));
+  const [errors, setErrors] = useState<{ winnings?: string; settled_date?: string }>({});
+  const [saving, setSaving] = useState(false);
+
+  React.useEffect(() => {
+    if (contest) {
+      setFinish(contest.finish_position != null ? String(contest.finish_position) : "");
+      setWinnings(contest.winnings != null ? String(contest.winnings) : "");
+      setSettledDate(new Date().toISOString().slice(0, 10));
+      setErrors({});
+    }
+  }, [contest]);
+
+  async function handleSave() {
+    const e: { winnings?: string; settled_date?: string } = {};
+    if (winnings === "" || isNaN(Number(winnings)) || Number(winnings) < 0)
+      e.winnings = "Enter winnings (0 if you lost)";
+    if (!settledDate) e.settled_date = "Required";
+    setErrors(e);
+    if (Object.keys(e).length > 0) return;
+    setSaving(true);
+    await onSave(contest!.id, {
+      finish_position: finish ? Number(finish) : undefined,
+      winnings: Number(winnings),
+      settled_date: settledDate,
+    });
+    setSaving(false);
+    onClose();
+  }
+
+  return (
+    <Dialog open={!!contest} onClose={onClose} title={`Settle: ${contest?.description ?? ""}`}>
+      <div className="flex flex-col gap-4">
+        <div className="rounded-[var(--radius-sm)] bg-[var(--color-surface-raised)] px-3 py-2 text-sm">
+          <span className="text-[var(--color-text-muted)]">Entry fee:</span>{" "}
+          <strong>{formatCurrency(contest?.entry_fee ?? 0)}</strong>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Finish Position (optional)" type="number" min="1" placeholder="42"
+            value={finish} onChange={(e) => setFinish(e.target.value)} />
+          <Input label="Winnings ($)" type="number" step="0.01" min="0" placeholder="0.00"
+            value={winnings} onChange={(e) => setWinnings(e.target.value)}
+            error={errors.winnings} />
+        </div>
+        <Input label="Settled Date" type="date" value={settledDate}
+          onChange={(e) => setSettledDate(e.target.value)} error={errors.settled_date} />
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button size="sm" onClick={handleSave} disabled={saving}>{saving ? "Saving…" : "Settle"}</Button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export function FantasyPage() {
   const { accounts, loading: accountsLoading, addAccount, editAccount } = useFantasyAccounts();
+  const { links: fundingLinks, removeLink: removeFundingLink, addLink: addFundingLink } = useFantasyLinks();
+  const { accounts: checkingAccounts } = useCheckingAccounts();
+  const { accounts: savingsAccounts } = useSavingsAccounts();
+  const { conn } = useDb();
   const [selectedId, setSelectedId] = useState<string>("ALL");
 
   const effectiveId = accounts.length === 0 ? "ALL" : selectedId;
@@ -520,11 +864,14 @@ export function FantasyPage() {
   const {
     transactions, openFutures, settledFutures,
     seasons, activeSeasons, settledSeasons,
+    contests, betSessions,
     balanceSummary, loading: dataLoading,
     currentBalance, totalOpenStake,
     addTransaction, removeTransaction,
     addFuture, settleFuture, removeFuture,
     addSeason, settleSeason, removeSeason,
+    addContest, resolveContest, removeContest,
+    addBetSession, settleBetSession, removeBetSession,
   } = useFantasyData(effectiveId);
 
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -538,6 +885,12 @@ export function FantasyPage() {
   const [seasonDialogOpen, setSeasonDialogOpen] = useState(false);
   const [showSettledFutures, setShowSettledFutures] = useState(false);
   const [showSettledSeasons, setShowSettledSeasons] = useState(false);
+  const [contestDialogOpen, setContestDialogOpen] = useState(false);
+  const [settleContestTarget, setSettleContestTarget] = useState<FantasyContest | null>(null);
+  const [showSettledContests, setShowSettledContests] = useState(false);
+  const [betSessionDialogOpen, setBetSessionDialogOpen] = useState(false);
+  const [settleBetSessionDialogOpen, setSettleBetSessionDialogOpen] = useState(false);
+  const [settlingBetSession, setSettlingBetSession] = useState<FantasyBetSession | null>(null);
   const [winBanners, setWinBanners] = useState<WinBanner[]>([]);
 
   React.useEffect(() => {
@@ -577,17 +930,25 @@ export function FantasyPage() {
 
   // ── Performance analytics (sportsbook + DFS only) ──────────────────────────
 
-  // Non-league summary rows
-  const sbSummary = useMemo(
-    () => balanceSummary.filter((a) => !isLeague(a.platform_type)),
-    [balanceSummary]
-  );
+  // Non-league summary rows — scoped to selected account when not in ALL view
+  const sbSummary = useMemo(() => {
+    const nonLeague = balanceSummary.filter((a) => !isLeague(a.platform_type));
+    return effectiveId === "ALL" ? nonLeague : nonLeague.filter((a) => a.account_id === effectiveId);
+  }, [balanceSummary, effectiveId]);
+
+  // Funding links scoped to the selected account (or all if ALL view)
+  const visibleFundingLinks = useMemo(() =>
+    effectiveId === "ALL"
+      ? fundingLinks
+      : fundingLinks.filter((l) => l.fantasy_account_id === effectiveId),
+  [fundingLinks, effectiveId]);
 
   // Totals for stat cards
   const perfStats = useMemo(() => {
-    // Sportsbook/DFS: only count explicit deposit/cashout transactions.
+    // Sportsbook/DFS: direct deposits + linked deposits that created a fantasy tx are in total_deposited.
+    // Orphan links (old manual links with no fantasy_tx_id) are counted separately via orphan_linked_in.
     // starting_balance is an account snapshot (origin point), not a P&L event.
-    const sbTotalIn  = sbSummary.reduce((s, a) => s + a.total_deposited, 0);
+    const sbTotalIn  = sbSummary.reduce((s, a) => s + a.total_deposited + a.orphan_linked_in, 0);
     const sbTotalOut = sbSummary.reduce((s, a) => s + a.total_cashout, 0);
     const inAccounts = sbSummary.reduce((s, a) => s + a.current_balance, 0);
 
@@ -604,7 +965,8 @@ export function FantasyPage() {
     // "Still in accounts" is shown separately — it isn't counted here so that
     // brand-new accounts with only a starting_balance don't distort the number.
     const netPnL = totalOut - totalIn;
-    return { totalIn, totalOut, inAccounts, netPnL };
+    const bettingPnL = sbSummary.reduce((s, a) => s + (a.net_betting_pnl ?? 0), 0);
+    return { totalIn, totalOut, inAccounts, netPnL, bettingPnL };
   }, [sbSummary, seasons]);
 
   // Monthly net per platform (for bar chart)
@@ -656,6 +1018,12 @@ export function FantasyPage() {
 
   const selectedLabel = effectiveId === "ALL" ? "All Accounts" : selectedAccount?.name ?? "Select Account";
 
+  // Source account options for deposit origin selector
+  const sourceAccountOptions = [
+    ...checkingAccounts.map((a) => ({ value: `checking:${a.id}`, label: `Checking · ${a.name}` })),
+    ...savingsAccounts.map((a) => ({ value: `savings:${a.id}`, label: `Savings · ${a.name}` })),
+  ];
+
   // Transaction dialog
   function openAddTx() { setTxForm(EMPTY_TX); setTxErrors({}); setTxDialogOpen(true); }
 
@@ -672,12 +1040,43 @@ export function FantasyPage() {
     if (!validateTx()) return;
     setTxSaving(true);
     const accountId = effectiveId === "ALL" ? (accounts[0]?.id ?? "") : effectiveId;
-    await addTransaction({
+    const fantasyTxId = await addTransaction({
       account_id: accountId, type: txForm.type,
       amount: Number(txForm.amount), description: txForm.description.trim(),
       transaction_date: txForm.transaction_date,
       notes: txForm.notes.trim() || undefined,
     });
+
+    // Optionally create a matching debit in the source checking/savings account + funding link
+    if (txForm.type === "deposit" && txForm.from_source && txForm.source_account_id && conn) {
+      const [sourceType, sourceId] = txForm.source_account_id.split(":");
+      const desc = txForm.description.trim() || "Fantasy deposit";
+      if (sourceType === "checking") {
+        const srcTxId = await insertTransaction(conn, {
+          account_id: sourceId!,
+          type: "debit",
+          amount: Number(txForm.amount),
+          description: desc,
+          transaction_date: txForm.transaction_date,
+          notes: txForm.notes.trim() || undefined,
+          category: "Fantasy",
+        });
+        if (srcTxId) {
+          // Pass fantasy_tx_id so this link is not double-counted in Total Deposited
+          await addFundingLink({ checking_tx_id: srcTxId, fantasy_account_id: accountId, fantasy_tx_id: fantasyTxId ?? undefined });
+        }
+      } else if (sourceType === "savings") {
+        await insertSavingsTransaction(conn, {
+          account_id: sourceId!,
+          type: "withdrawal",
+          amount: Number(txForm.amount),
+          description: desc,
+          transaction_date: txForm.transaction_date,
+          notes: txForm.notes.trim() || undefined,
+        });
+      }
+    }
+
     setTxSaving(false);
     setTxDialogOpen(false);
   }
@@ -685,7 +1084,17 @@ export function FantasyPage() {
   // Settle future
   async function handleSettleFuture(id: string, status: FutureStatus) {
     const future = openFutures.find((f) => f.id === id);
-    await settleFuture(id, status);
+    const today = new Date().toISOString().slice(0, 10);
+    await settleFuture(id, status,
+      status === "won" && future && future.potential_payout != null
+        ? {
+            account_id: future.account_id,
+            amount: future.potential_payout,
+            description: `Win: ${future.description}`,
+            date: today,
+          }
+        : undefined
+    );
     if (status === "won" && future) {
       setWinBanners((prev) => [...prev, { id, description: future.description, payout: future.potential_payout }]);
     }
@@ -735,7 +1144,7 @@ export function FantasyPage() {
             <strong>{b.description}</strong> ended as a win!
             {b.payout != null && (
               <span className="ml-2 text-[var(--color-success)]">
-                Add <strong>{formatCurrency(b.payout)}</strong> to Checking as income.
+                <strong>{formatCurrency(b.payout)}</strong> deposited to your account balance.
               </span>
             )}
           </span>
@@ -869,6 +1278,20 @@ export function FantasyPage() {
           {(!viewIsLeague || viewIsAll) && sbAccounts.length > 0 && (
             <Button variant="outline" size="sm" onClick={() => setFutureDialogOpen(true)}>
               <TrendingUp size={14} /> Add Future
+            </Button>
+          )}
+
+          {/* DFS/non-league view: Add Contest */}
+          {(!viewIsLeague || viewIsAll) && sbAccounts.length > 0 && (
+            <Button variant="outline" size="sm" onClick={() => setContestDialogOpen(true)}>
+              <ClipboardList size={14} /> Add Contest
+            </Button>
+          )}
+
+          {/* Log Bet Result — single non-league account only */}
+          {!viewIsLeague && !viewIsAll && (
+            <Button variant="outline" size="sm" onClick={() => setBetSessionDialogOpen(true)}>
+              <Dices size={14} /> Log Bet Result
             </Button>
           )}
 
@@ -1007,6 +1430,22 @@ export function FantasyPage() {
                 <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">current tracked balance</p>
               </CardContent>
             </Card>
+
+            {betSessions.some((b) => b.total_settled != null) && (
+              <Card className="relative overflow-hidden">
+                <div className="absolute left-0 top-0 h-full w-1 rounded-l-[var(--radius)]"
+                  style={{ backgroundColor: perfStats.bettingPnL >= 0 ? "var(--color-success)" : "var(--color-danger)" }} />
+                <CardContent className="p-5 pl-6">
+                  <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">Betting P&L</p>
+                  <p className={cn("mt-1 text-2xl font-bold",
+                    perfStats.bettingPnL > 0 ? "text-[var(--color-success)]" : perfStats.bettingPnL < 0 ? "text-[var(--color-danger)]" : ""
+                  )}>
+                    {perfStats.bettingPnL >= 0 ? "+" : ""}{formatCurrency(perfStats.bettingPnL)}
+                  </p>
+                  <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">net across all bet sessions</p>
+                </CardContent>
+              </Card>
+            )}
           </div>
 
           {/* Charts */}
@@ -1080,6 +1519,127 @@ export function FantasyPage() {
           )}
         </>
       )}
+
+      {/* ── Contests (DFS / sportsbook) ───────────────────────────────────── */}
+      {!viewIsLeague && contests.length > 0 && (() => {
+        const pending  = contests.filter((c) => c.settled_date == null);
+        const settled  = contests.filter((c) => c.settled_date != null);
+        const visible  = showSettledContests ? contests : pending.length > 0 ? pending : contests;
+        const totalNet = settled.reduce((s, c) => s + (c.winnings ?? 0) - c.entry_fee, 0);
+
+        return (
+          <Card>
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ClipboardList size={15} className="text-[var(--color-primary)]" />
+                  <CardTitle className="text-sm font-semibold">
+                    Contests{pending.length > 0 && ` (${pending.length} pending)`}
+                  </CardTitle>
+                  {settled.length > 0 && (
+                    <span className={`text-xs font-medium ${totalNet >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}`}>
+                      {totalNet >= 0 ? "+" : ""}{formatCurrency(totalNet)} net
+                    </span>
+                  )}
+                </div>
+                {settled.length > 0 && (
+                  <button
+                    onClick={() => setShowSettledContests((v) => !v)}
+                    className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                  >
+                    {showSettledContests ? "Hide settled" : `Show all (${contests.length})`}
+                  </button>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[var(--color-border-subtle)] text-xs text-[var(--color-text-muted)]">
+                    <th className="pb-2 text-left font-medium">Description</th>
+                    {viewIsAll && <th className="pb-2 text-left font-medium">Account</th>}
+                    <th className="pb-2 text-right font-medium">Entry Fee</th>
+                    <th className="pb-2 text-right font-medium">Contest Size</th>
+                    <th className="pb-2 text-right font-medium">Placed</th>
+                    <th className="pb-2 text-right font-medium">Finish</th>
+                    <th className="pb-2 text-right font-medium">Winnings</th>
+                    <th className="pb-2 text-right font-medium">Net</th>
+                    <th className="pb-2 text-right font-medium">Settled</th>
+                    <th className="pb-2" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-border-subtle)]">
+                  {visible.map((c) => {
+                    const isSettled = c.settled_date != null;
+                    const net = isSettled ? (c.winnings ?? 0) - c.entry_fee : null;
+                    return (
+                      <tr key={c.id} className="group">
+                        <td className="py-2.5 pr-3 font-medium">{c.description}</td>
+                        {viewIsAll && (
+                          <td className="py-2.5 pr-3 text-xs text-[var(--color-text-muted)]">{c.account_name}</td>
+                        )}
+                        <td className="py-2.5 pr-3 text-right text-[var(--color-danger)]">
+                          {formatCurrency(c.entry_fee)}
+                        </td>
+                        <td className="py-2.5 pr-3 text-right text-[var(--color-text-muted)]">
+                          {c.contest_size != null ? c.contest_size.toLocaleString() : <span className="text-[var(--color-text-subtle)]">—</span>}
+                        </td>
+                        <td className="py-2.5 pr-3 text-right text-[var(--color-text-muted)]">
+                          {formatDate(c.placed_date)}
+                        </td>
+                        <td className="py-2.5 pr-3 text-right text-[var(--color-text-muted)]">
+                          {c.finish_position != null
+                            ? c.contest_size != null
+                              ? `${c.finish_position} / ${c.contest_size.toLocaleString()}`
+                              : String(c.finish_position)
+                            : <span className="text-[var(--color-text-subtle)]">—</span>}
+                        </td>
+                        <td className="py-2.5 pr-3 text-right">
+                          {isSettled
+                            ? <span className={(c.winnings ?? 0) > 0 ? "text-[var(--color-success)]" : "text-[var(--color-text-muted)]"}>
+                                {formatCurrency(c.winnings ?? 0)}
+                              </span>
+                            : <span className="text-[var(--color-text-subtle)]">—</span>}
+                        </td>
+                        <td className="py-2.5 pr-3 text-right font-medium">
+                          {net != null
+                            ? <span className={net >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}>
+                                {net >= 0 ? "+" : ""}{formatCurrency(net)}
+                              </span>
+                            : <Badge variant="outline">Pending</Badge>}
+                        </td>
+                        <td className="py-2.5 pr-3 text-right text-[var(--color-text-muted)]">
+                          {c.settled_date ? formatDate(c.settled_date) : <span className="text-[var(--color-text-subtle)]">—</span>}
+                        </td>
+                        <td className="py-2.5 pl-2">
+                          <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                            {!isSettled && (
+                              <button
+                                onClick={() => setSettleContestTarget(c)}
+                                className="rounded px-1.5 py-0.5 text-xs font-medium text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10"
+                                title="Settle contest"
+                              >
+                                Settle
+                              </button>
+                            )}
+                            <button
+                              onClick={() => removeContest(c.id)}
+                              className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]"
+                              title="Delete"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+        );
+      })()}
 
       {/* ── Seasons section (league accounts) ─────────────────────────────── */}
       {(viewIsLeague || (viewIsAll && leagueAccounts.length > 0)) && (
@@ -1240,6 +1800,121 @@ export function FantasyPage() {
         </Card>
       )}
 
+      {/* ── Bet Sessions ──────────────────────────────────────────────────── */}
+      {!viewIsLeague && betSessions.length > 0 && (() => {
+        const openSessions   = betSessions.filter((b) => b.total_settled == null);
+        const settledSessions = betSessions.filter((b) => b.total_settled != null);
+        const totalNet = settledSessions.reduce((s, b) => s + (b.net ?? 0), 0);
+        return (
+          <Card>
+            <CardHeader className="pb-2">
+              <div className="flex items-center gap-2">
+                <Dices size={15} className="text-[var(--color-primary)]" />
+                <CardTitle className="text-sm font-semibold">Bet Sessions</CardTitle>
+                {settledSessions.length > 0 && (
+                  <span className={`text-xs font-medium ${totalNet >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}`}>
+                    {totalNet >= 0 ? "+" : ""}{formatCurrency(totalNet)} net
+                  </span>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4">
+              {/* Open sessions */}
+              {openSessions.length > 0 && (
+                <div>
+                  <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">Open</p>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[var(--color-border-subtle)] text-xs text-[var(--color-text-muted)]">
+                        <th className="pb-2 text-left font-medium">Date</th>
+                        {viewIsAll && <th className="pb-2 text-left font-medium">Account</th>}
+                        <th className="pb-2 text-right font-medium">Total Bet</th>
+                        <th className="pb-2 pl-3 text-left font-medium">Notes</th>
+                        <th className="pb-2" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--color-border-subtle)]">
+                      {openSessions.map((b) => (
+                        <tr key={b.id} className="group">
+                          <td className="py-2.5 pr-3 text-[var(--color-text-muted)]">{formatDate(b.session_date)}</td>
+                          {viewIsAll && <td className="py-2.5 pr-3 text-xs text-[var(--color-text-muted)]">{b.account_name}</td>}
+                          <td className="py-2.5 pr-3 text-right">{formatCurrency(b.total_bet)}</td>
+                          <td className="py-2.5 pl-3 text-xs text-[var(--color-text-muted)]">
+                            {b.notes ?? <span className="text-[var(--color-text-subtle)]">—</span>}
+                          </td>
+                          <td className="py-2.5 pl-2">
+                            <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                              <button
+                                onClick={() => { setSettlingBetSession(b); setSettleBetSessionDialogOpen(true); }}
+                                className="rounded px-2 py-0.5 text-xs font-medium text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10"
+                                title="Settle">
+                                Settle
+                              </button>
+                              <button onClick={() => removeBetSession(b.id)}
+                                className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]"
+                                title="Delete">
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Settled sessions */}
+              {settledSessions.length > 0 && (
+                <div>
+                  {openSessions.length > 0 && (
+                    <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">Settled</p>
+                  )}
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[var(--color-border-subtle)] text-xs text-[var(--color-text-muted)]">
+                        <th className="pb-2 text-left font-medium">Date</th>
+                        {viewIsAll && <th className="pb-2 text-left font-medium">Account</th>}
+                        <th className="pb-2 text-right font-medium">Total Bet</th>
+                        <th className="pb-2 text-right font-medium">Total Settled</th>
+                        <th className="pb-2 text-right font-medium">Net P&L</th>
+                        <th className="pb-2 pl-3 text-left font-medium">Notes</th>
+                        <th className="pb-2" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--color-border-subtle)]">
+                      {settledSessions.map((b) => (
+                        <tr key={b.id} className="group">
+                          <td className="py-2.5 pr-3 text-[var(--color-text-muted)]">{formatDate(b.session_date)}</td>
+                          {viewIsAll && <td className="py-2.5 pr-3 text-xs text-[var(--color-text-muted)]">{b.account_name}</td>}
+                          <td className="py-2.5 pr-3 text-right">{formatCurrency(b.total_bet)}</td>
+                          <td className="py-2.5 pr-3 text-right">{formatCurrency(b.total_settled!)}</td>
+                          <td className="py-2.5 pr-3 text-right font-medium">
+                            <span className={(b.net ?? 0) >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}>
+                              {(b.net ?? 0) >= 0 ? "+" : ""}{formatCurrency(b.net ?? 0)}
+                            </span>
+                          </td>
+                          <td className="py-2.5 pl-3 text-xs text-[var(--color-text-muted)]">
+                            {b.notes ?? <span className="text-[var(--color-text-subtle)]">—</span>}
+                          </td>
+                          <td className="py-2.5 pl-2 opacity-0 transition-opacity group-hover:opacity-100">
+                            <button onClick={() => removeBetSession(b.id)}
+                              className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]"
+                              title="Delete">
+                              <Trash2 size={13} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        );
+      })()}
+
       {/* Transaction history (sportsbook/DFS only) */}
       {!viewIsLeague && transactions.length > 0 && (
         <div className="flex flex-col gap-4">
@@ -1290,6 +1965,65 @@ export function FantasyPage() {
         </div>
       )}
 
+      {/* ── Funding Log ─────────────────────────────────────────────────────── */}
+      {visibleFundingLinks.length > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center gap-2">
+              <Link2 size={15} className="text-[var(--color-primary)]" />
+              <CardTitle className="text-sm font-semibold">
+                Funding Log ({visibleFundingLinks.length})
+              </CardTitle>
+            </div>
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Checking transactions that funded this account.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[var(--color-border-subtle)] text-xs text-[var(--color-text-muted)]">
+                  <th className="pb-2 text-left font-medium">Description</th>
+                  <th className="pb-2 text-left font-medium">Source</th>
+                  <th className="pb-2 text-left font-medium">Fantasy Account</th>
+                  <th className="pb-2 text-right font-medium">Amount</th>
+                  <th className="pb-2 text-right font-medium">Date</th>
+                  <th className="pb-2" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--color-border-subtle)]">
+                {visibleFundingLinks.map((link) => (
+                  <tr key={link.id} className="group">
+                    <td className="py-2.5 pr-3 font-medium">{link.description}</td>
+                    <td className="py-2.5 pr-3 text-xs text-[var(--color-text-muted)]">{link.source_account_name}</td>
+                    <td className="py-2.5 pr-3">
+                      <span className="rounded-full bg-[var(--color-primary)]/10 px-2 py-0.5 text-xs font-medium text-[var(--color-primary)]">
+                        {link.fantasy_account_name}
+                      </span>
+                    </td>
+                    <td className="py-2.5 pr-3 text-right font-medium text-[var(--color-danger)]">
+                      -{formatCurrency(link.amount)}
+                    </td>
+                    <td className="py-2.5 pr-3 text-right text-[var(--color-text-muted)]">
+                      {formatDate(link.transaction_date)}
+                    </td>
+                    <td className="py-2.5 pl-2 opacity-0 transition-opacity group-hover:opacity-100">
+                      <button
+                        onClick={() => removeFundingLink(link.id)}
+                        className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]"
+                        title="Remove tag"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+
       {/* ── Dialogs ─────────────────────────────────────────────────────────── */}
 
       {/* Deposit/Cashout */}
@@ -1309,6 +2043,33 @@ export function FantasyPage() {
             error={txErrors.transaction_date} />
           <Input label="Notes (optional)" placeholder="Any context" value={txForm.notes}
             onChange={(e) => setTxForm((f) => ({ ...f, notes: e.target.value }))} />
+
+          {txForm.type === "deposit" && sourceAccountOptions.length > 0 && (
+            <div className="flex flex-col gap-2 rounded-[var(--radius-sm)] border border-[var(--color-border-subtle)] p-3">
+              <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={txForm.from_source}
+                  onChange={(e) => setTxForm((f) => ({
+                    ...f,
+                    from_source: e.target.checked,
+                    source_account_id: e.target.checked ? (sourceAccountOptions[0]?.value ?? "") : "",
+                  }))}
+                  className="accent-[var(--color-primary)]"
+                />
+                Came from checking / savings
+              </label>
+              {txForm.from_source && (
+                <Select
+                  label="Source account"
+                  options={sourceAccountOptions}
+                  value={txForm.source_account_id}
+                  onChange={(e) => setTxForm((f) => ({ ...f, source_account_id: e.target.value }))}
+                />
+              )}
+            </div>
+          )}
+
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="outline" size="sm" onClick={() => setTxDialogOpen(false)}>Cancel</Button>
             <Button size="sm" onClick={handleSaveTx} disabled={txSaving}>{txSaving ? "Saving…" : "Save"}</Button>
@@ -1323,6 +2084,38 @@ export function FantasyPage() {
         accounts={accounts}
         defaultAccountId={viewIsLeague ? (sbAccounts[0]?.id ?? "") : (effectiveId === "ALL" ? (sbAccounts[0]?.id ?? "") : effectiveId)}
         onSave={addFuture}
+      />
+
+      {/* Log Bet Session */}
+      <BetSessionDialog
+        open={betSessionDialogOpen}
+        onClose={() => setBetSessionDialogOpen(false)}
+        accountId={effectiveId}
+        onSave={addBetSession}
+      />
+
+      {/* Settle Bet Session */}
+      <SettleBetSessionDialog
+        open={settleBetSessionDialogOpen}
+        onClose={() => { setSettleBetSessionDialogOpen(false); setSettlingBetSession(null); }}
+        session={settlingBetSession}
+        onSettle={settleBetSession}
+      />
+
+      {/* Add Contest */}
+      <ContestDialog
+        open={contestDialogOpen}
+        onClose={() => setContestDialogOpen(false)}
+        accounts={accounts}
+        defaultAccountId={viewIsLeague ? (sbAccounts[0]?.id ?? "") : (effectiveId === "ALL" ? (sbAccounts[0]?.id ?? "") : effectiveId)}
+        onSave={addContest}
+      />
+
+      {/* Settle Contest */}
+      <SettleContestDialog
+        contest={settleContestTarget}
+        onClose={() => setSettleContestTarget(null)}
+        onSave={resolveContest}
       />
 
       {/* Add Season */}

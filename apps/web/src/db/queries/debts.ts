@@ -18,9 +18,16 @@ export interface DebtPayment {
   debt_id: string;
   payment_amount: number;
   payment_date: string;
+  entry_type: "payment" | "interest" | "fee";
+  checking_tx_id: string | null;
   principal_paid: number | null;
   interest_paid: number | null;
   notes: string | null;
+}
+
+export interface DebtLogEntry extends DebtPayment {
+  debt_name: string;
+  source_account_name: string | null;
 }
 
 export const DEBT_TYPES = [
@@ -84,21 +91,78 @@ export async function deleteDebt(conn: AsyncDuckDBConnection, id: string): Promi
 
 export async function insertDebtPayment(
   conn: AsyncDuckDBConnection,
-  data: { debt_id: string; payment_amount: number; payment_date: string; notes?: string }
+  data: {
+    debt_id: string;
+    payment_amount: number;
+    payment_date: string;
+    checking_tx_id?: string | null;
+    notes?: string;
+  }
 ): Promise<void> {
   const id = nanoid();
+  const txId = data.checking_tx_id ? `'${data.checking_tx_id}'` : "NULL";
   await conn.query(`
-    INSERT INTO debt_payments (id, debt_id, payment_amount, payment_date, notes)
+    INSERT INTO debt_payments (id, debt_id, payment_amount, payment_date, entry_type, checking_tx_id, notes)
     VALUES ('${id}', '${data.debt_id}', ${data.payment_amount}, '${data.payment_date}',
-            ${data.notes ? `'${esc(data.notes)}'` : "NULL"})
+            'payment', ${txId}, ${data.notes ? `'${esc(data.notes)}'` : "NULL"})
   `);
-  // Update current balance
   await conn.query(`
     UPDATE debts SET
       current_balance = GREATEST(0, current_balance - ${data.payment_amount}),
       updated_at = now()
     WHERE id = '${data.debt_id}'
   `);
+}
+
+// Record interest or fee accrual — increases the balance
+export async function insertDebtCharge(
+  conn: AsyncDuckDBConnection,
+  data: {
+    debt_id: string;
+    amount: number;
+    charge_date: string;
+    entry_type: "interest" | "fee";
+    notes?: string;
+  }
+): Promise<void> {
+  const id = nanoid();
+  await conn.query(`
+    INSERT INTO debt_payments (id, debt_id, payment_amount, payment_date, entry_type, checking_tx_id, notes)
+    VALUES ('${id}', '${data.debt_id}', ${data.amount}, '${data.charge_date}',
+            '${data.entry_type}', NULL, ${data.notes ? `'${esc(data.notes)}'` : "NULL"})
+  `);
+  await conn.query(`
+    UPDATE debts SET
+      current_balance = current_balance + ${data.amount},
+      updated_at = now()
+    WHERE id = '${data.debt_id}'
+  `);
+}
+
+// All log entries across all debts, joined with debt name + checking source account name
+export async function getAllDebtLog(
+  conn: AsyncDuckDBConnection
+): Promise<DebtLogEntry[]> {
+  const result = await conn.query(`
+    SELECT
+      dp.id,
+      dp.debt_id,
+      d.name                             AS debt_name,
+      dp.payment_amount::DOUBLE          AS payment_amount,
+      dp.payment_date::VARCHAR           AS payment_date,
+      dp.entry_type,
+      dp.checking_tx_id,
+      ca.name                            AS source_account_name,
+      dp.principal_paid::DOUBLE          AS principal_paid,
+      dp.interest_paid::DOUBLE           AS interest_paid,
+      dp.notes
+    FROM debt_payments dp
+    JOIN debts d ON dp.debt_id = d.id
+    LEFT JOIN checking_transactions ct ON dp.checking_tx_id = ct.id
+    LEFT JOIN checking_accounts ca     ON ct.account_id = ca.id
+    ORDER BY dp.payment_date DESC, dp.created_at DESC
+  `);
+  return result.toArray() as unknown as DebtLogEntry[];
 }
 
 export async function getDebtPayments(conn: AsyncDuckDBConnection, debtId: string): Promise<DebtPayment[]> {

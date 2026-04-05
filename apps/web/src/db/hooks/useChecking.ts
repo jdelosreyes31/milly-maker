@@ -8,6 +8,7 @@ import {
   updateCheckingAccount,
   deleteCheckingAccount,
   insertTransaction,
+  updateTransaction,
   deleteTransaction,
   getCheckingBalanceSummary,
 } from "../queries/checking.js";
@@ -80,9 +81,19 @@ export function useCheckingTransactions(selectedAccountId: string) {
   useEffect(() => { void refresh(); }, [refresh]);
 
   const addTransaction = useCallback(
-    async (data: Parameters<typeof insertTransaction>[1]) => {
+    async (data: Parameters<typeof insertTransaction>[1]): Promise<string | undefined> => {
       if (!conn) return;
-      await insertTransaction(conn, data);
+      const id = await insertTransaction(conn, data);
+      await refresh();
+      return id;
+    },
+    [conn, refresh]
+  );
+
+  const editTransaction = useCallback(
+    async (id: string, data: Parameters<typeof updateTransaction>[2]) => {
+      if (!conn) return;
+      await updateTransaction(conn, id, data);
       await refresh();
     },
     [conn, refresh]
@@ -103,5 +114,5 @@ export function useCheckingTransactions(selectedAccountId: string) {
       ? balanceSummary.reduce((s, a) => s + a.current_balance, 0)
       : balanceSummary.find((a) => a.account_id === selectedAccountId)?.current_balance ?? 0;
 
-  return { transactions, balanceSummary, loading, refresh, addTransaction, removeTransaction, currentBalance };
+  return { transactions, balanceSummary, loading, refresh, addTransaction, editTransaction, removeTransaction, currentBalance };
 }

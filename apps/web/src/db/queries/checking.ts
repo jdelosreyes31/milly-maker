@@ -13,6 +13,14 @@ export interface CheckingAccount {
 
 export type TransactionType = "debit" | "credit" | "transfer";
 
+export const CHECKING_CATEGORIES = [
+  "Housing", "Food & Dining", "Transportation", "Entertainment",
+  "Shopping", "Healthcare", "Utilities", "Personal Care",
+  "Travel", "Education", "Subscriptions", "Debt Payment",
+  "Fantasy", "Transfer", "Other",
+] as const;
+export type CheckingCategory = typeof CHECKING_CATEGORIES[number];
+
 export interface CheckingTransaction {
   id: string;
   account_id: string;
@@ -22,6 +30,7 @@ export interface CheckingTransaction {
   transaction_date: string;
   transfer_to_account_id: string | null;
   transfer_pair_id: string | null;
+  category: string | null;
   notes: string | null;
   created_at: string;
 }
@@ -100,6 +109,7 @@ export async function getTransactionsForAccount(
       t.transaction_date::VARCHAR AS transaction_date,
       t.transfer_to_account_id,
       t.transfer_pair_id,
+      t.category,
       t.notes,
       t.created_at::VARCHAR AS created_at,
       a.name AS account_name
@@ -176,15 +186,17 @@ export async function insertTransaction(
     transaction_date: string;
     transfer_to_account_id?: string;         // destination is a checking account
     transfer_to_savings_account_id?: string; // destination is a savings account
+    category?: string;
     notes?: string;
   }
-): Promise<void> {
+): Promise<string> {
   const id = nanoid();
   const pairId = data.type === "transfer" ? nanoid() : null;
+  const category = data.category ? `'${esc(data.category)}'` : "NULL";
 
   await conn.query(`
     INSERT INTO checking_transactions
-      (id, account_id, type, amount, description, transaction_date, transfer_to_account_id, transfer_pair_id, notes)
+      (id, account_id, type, amount, description, transaction_date, transfer_to_account_id, transfer_pair_id, category, notes)
     VALUES (
       '${id}',
       '${data.account_id}',
@@ -194,6 +206,7 @@ export async function insertTransaction(
       '${data.transaction_date}',
       ${data.transfer_to_account_id ? `'${data.transfer_to_account_id}'` : "NULL"},
       ${pairId ? `'${pairId}'` : "NULL"},
+      ${category},
       ${data.notes ? `'${esc(data.notes)}'` : "NULL"}
     )
   `);
@@ -236,6 +249,28 @@ export async function insertTransaction(
       )
     `);
   }
+  return id;
+}
+
+export async function updateTransaction(
+  conn: AsyncDuckDBConnection,
+  id: string,
+  data: {
+    amount?: number;
+    description?: string;
+    transaction_date?: string;
+    category?: string | null;
+    notes?: string | null;
+  }
+): Promise<void> {
+  const parts: string[] = [];
+  if (data.amount !== undefined)           parts.push(`amount = ${data.amount}`);
+  if (data.description !== undefined)      parts.push(`description = '${esc(data.description)}'`);
+  if (data.transaction_date !== undefined) parts.push(`transaction_date = '${data.transaction_date}'`);
+  if ("category" in data)  parts.push(`category = ${data.category ? `'${esc(data.category)}'` : "NULL"}`);
+  if ("notes" in data)     parts.push(`notes = ${data.notes ? `'${esc(data.notes)}'` : "NULL"}`);
+  if (parts.length === 0) return;
+  await conn.query(`UPDATE checking_transactions SET ${parts.join(", ")} WHERE id = '${id}'`);
 }
 
 export async function deleteTransaction(
@@ -302,6 +337,24 @@ export async function getMonthlyCreditTotals(
     ORDER BY 1 ASC
   `);
   return result.toArray() as unknown as { month: string; total: number }[];
+}
+
+export async function getSpendingByCategory(
+  conn: AsyncDuckDBConnection,
+  month?: string // "YYYY-MM", defaults to current month
+): Promise<{ category: string; total: number }[]> {
+  const m = month ?? new Date().toISOString().slice(0, 7);
+  const result = await conn.query(`
+    SELECT
+      COALESCE(category, 'Uncategorized') AS category,
+      SUM(amount)::DOUBLE AS total
+    FROM checking_transactions
+    WHERE type = 'debit'
+      AND strftime(transaction_date, '%Y-%m') = '${m}'
+    GROUP BY COALESCE(category, 'Uncategorized')
+    ORDER BY total DESC
+  `);
+  return result.toArray() as unknown as { category: string; total: number }[];
 }
 
 function esc(s: string): string {

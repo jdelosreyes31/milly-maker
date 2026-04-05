@@ -8,6 +8,12 @@ import {
 } from "@milly-maker/ui";
 import { useCheckingAccounts, useCheckingTransactions } from "@/db/hooks/useChecking.js";
 import { useSavingsAccounts } from "@/db/hooks/useSavings.js";
+import { useDebts } from "@/db/hooks/useDebts.js";
+import { useFantasyAccounts, useFantasyLinks } from "@/db/hooks/useFantasy.js";
+import { useSubscriptions } from "@/db/hooks/useSubscriptions.js";
+import { useDb } from "@/db/hooks/useDb.js";
+import { insertDebtPayment } from "@/db/queries/debts.js";
+import { CHECKING_CATEGORIES } from "@/db/queries/checking.js";
 import type { TransactionType } from "@/db/queries/checking.js";
 
 // ── Account setup dialog ──────────────────────────────────────────────────────
@@ -80,6 +86,11 @@ interface TxFormState {
   // "checking:{id}" or "savings:{id}" — disambiguates destination table
   transfer_to: string;
   notes: string;
+  is_debt_payment: boolean;
+  debt_id: string;
+  is_fantasy_deposit: boolean;
+  fantasy_account_id: string;
+  category: string;
 }
 
 const EMPTY_TX: TxFormState = {
@@ -89,13 +100,23 @@ const EMPTY_TX: TxFormState = {
   transaction_date: new Date().toISOString().slice(0, 10),
   transfer_to: "",
   notes: "",
+  is_debt_payment: false,
+  debt_id: "",
+  is_fantasy_deposit: false,
+  fantasy_account_id: "",
+  category: "",
 };
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export function CheckingPage() {
+  const { conn } = useDb();
   const { accounts, loading: accountsLoading, addAccount, editAccount, removeAccount } = useCheckingAccounts();
   const { accounts: savingsAccounts } = useSavingsAccounts();
+  const { debts } = useDebts();
+  const { accounts: fantasyAccounts } = useFantasyAccounts();
+  const { addLink: addFantasyLink } = useFantasyLinks();
+  const { subscriptions } = useSubscriptions();
 
   // Selected account: "ALL" or a specific account id
   const [selectedId, setSelectedId] = useState<string>("ALL");
@@ -104,7 +125,7 @@ export function CheckingPage() {
 
   const {
     transactions, balanceSummary, loading: txLoading,
-    addTransaction, removeTransaction, currentBalance,
+    addTransaction, editTransaction, removeTransaction, currentBalance,
   } = useCheckingTransactions(effectiveId);
 
   // Account dialogs
@@ -113,6 +134,7 @@ export function CheckingPage() {
 
   // Transaction dialog
   const [txDialogOpen, setTxDialogOpen] = useState(false);
+  const [editingTxId, setEditingTxId] = useState<string | null>(null);
   const [txForm, setTxForm] = useState<TxFormState>(EMPTY_TX);
   const [txErrors, setTxErrors] = useState<Partial<TxFormState>>({});
   const [txSaving, setTxSaving] = useState(false);
@@ -156,9 +178,29 @@ export function CheckingPage() {
   ];
 
   function openAddTx() {
+    setEditingTxId(null);
     setTxForm({
       ...EMPTY_TX,
       transfer_to: transferDestOptions[0]?.value ?? "",
+    });
+    setTxErrors({});
+    setTxDialogOpen(true);
+  }
+
+  function openEditTx(tx: typeof transactions[0]) {
+    setEditingTxId(tx.id);
+    setTxForm({
+      type: tx.type,
+      amount: String(tx.amount),
+      description: tx.description,
+      transaction_date: tx.transaction_date,
+      transfer_to: transferDestOptions[0]?.value ?? "",
+      notes: tx.notes ?? "",
+      is_debt_payment: false,
+      debt_id: "",
+      is_fantasy_deposit: false,
+      fantasy_account_id: "",
+      category: tx.category ?? "",
     });
     setTxErrors({});
     setTxDialogOpen(true);
@@ -180,22 +222,51 @@ export function CheckingPage() {
     if (!validateTx()) return;
     setTxSaving(true);
 
-    const sourceId = effectiveId === "ALL" ? (accounts[0]?.id ?? "") : effectiveId;
+    if (editingTxId) {
+      // ── Edit mode: only update editable fields ───────────────────────────
+      await editTransaction(editingTxId, {
+        amount: Number(txForm.amount),
+        description: txForm.description.trim(),
+        transaction_date: txForm.transaction_date,
+        category: txForm.category || null,
+        notes: txForm.notes.trim() || null,
+      });
+    } else {
+      // ── Add mode ──────────────────────────────────────────────────────────
+      const sourceId = effectiveId === "ALL" ? (accounts[0]?.id ?? "") : effectiveId;
+      const isSavingsDest = txForm.transfer_to.startsWith("savings:");
+      const destId = txForm.transfer_to.replace(/^(checking|savings):/, "");
 
-    // Parse transfer destination
-    const isSavingsDest = txForm.transfer_to.startsWith("savings:");
-    const destId = txForm.transfer_to.replace(/^(checking|savings):/, "");
+      const txId = await addTransaction({
+        account_id: sourceId,
+        type: txForm.type,
+        amount: Number(txForm.amount),
+        description: txForm.description.trim(),
+        transaction_date: txForm.transaction_date,
+        transfer_to_account_id: txForm.type === "transfer" && !isSavingsDest ? destId : undefined,
+        transfer_to_savings_account_id: txForm.type === "transfer" && isSavingsDest ? destId : undefined,
+        category: txForm.category || undefined,
+        notes: txForm.notes.trim() || undefined,
+      });
 
-    await addTransaction({
-      account_id: sourceId,
-      type: txForm.type,
-      amount: Number(txForm.amount),
-      description: txForm.description.trim(),
-      transaction_date: txForm.transaction_date,
-      transfer_to_account_id: txForm.type === "transfer" && !isSavingsDest ? destId : undefined,
-      transfer_to_savings_account_id: txForm.type === "transfer" && isSavingsDest ? destId : undefined,
-      notes: txForm.notes.trim() || undefined,
-    });
+      if (txForm.type === "debit" && txForm.is_debt_payment && txForm.debt_id && conn) {
+        await insertDebtPayment(conn, {
+          debt_id: txForm.debt_id,
+          payment_amount: Number(txForm.amount),
+          payment_date: txForm.transaction_date,
+          checking_tx_id: txId ?? null,
+          notes: txForm.notes.trim() || undefined,
+        });
+      }
+
+      if (txForm.type === "debit" && txForm.is_fantasy_deposit && txForm.fantasy_account_id && txId) {
+        await addFantasyLink({
+          checking_tx_id: txId,
+          fantasy_account_id: txForm.fantasy_account_id,
+        });
+      }
+    }
+
     setTxSaving(false);
     setTxDialogOpen(false);
   }
@@ -402,6 +473,13 @@ export function CheckingPage() {
                           <td className="py-2 pr-3 text-[var(--color-text-muted)] text-xs">{tx.account_name}</td>
                         )}
                         <td className="py-2 pr-3">{typeBadge(tx.type)}</td>
+                        <td className="py-2 pr-3">
+                          {tx.category && (
+                            <span className="rounded-full bg-[var(--color-surface-raised)] border border-[var(--color-border-subtle)] px-2 py-0.5 text-xs text-[var(--color-text-muted)]">
+                              {tx.category}
+                            </span>
+                          )}
+                        </td>
                         <td className="py-2 pr-3 text-[var(--color-text-muted)]">
                           {formatDate(tx.transaction_date)}
                         </td>
@@ -414,12 +492,22 @@ export function CheckingPage() {
                           {formatCurrency(tx.running_balance)}
                         </td>
                         <td className="py-2 pl-2 opacity-0 transition-opacity group-hover:opacity-100">
-                          <button
-                            onClick={() => removeTransaction(tx.id, tx.transfer_pair_id)}
-                            className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]"
-                          >
-                            <Trash2 size={13} />
-                          </button>
+                          <div className="flex items-center gap-0.5">
+                            <button
+                              onClick={() => openEditTx(tx)}
+                              className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-primary)]"
+                              title="Edit transaction"
+                            >
+                              <Pencil size={13} />
+                            </button>
+                            <button
+                              onClick={() => removeTransaction(tx.id, tx.transfer_pair_id)}
+                              className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]"
+                              title="Delete transaction"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -431,15 +519,52 @@ export function CheckingPage() {
         })
       )}
 
-      {/* Add transaction dialog */}
-      <Dialog open={txDialogOpen} onClose={() => setTxDialogOpen(false)} title="Add Transaction">
+      {/* Add / Edit transaction dialog */}
+      <Dialog open={txDialogOpen} onClose={() => setTxDialogOpen(false)} title={editingTxId ? "Edit Transaction" : "Add Transaction"}>
         <div className="flex flex-col gap-4">
-          <Select
-            label="Type"
-            options={TYPE_OPTIONS}
-            value={txForm.type}
-            onChange={(e) => setTxForm((f) => ({ ...f, type: e.target.value as TransactionType }))}
-          />
+          {/* Type selector only shown when adding — editing preserves the original type */}
+          {!editingTxId && (
+            <Select
+              label="Type"
+              options={TYPE_OPTIONS}
+              value={txForm.type}
+              onChange={(e) => setTxForm((f) => ({ ...f, type: e.target.value as TransactionType }))}
+            />
+          )}
+          {editingTxId && (
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Type: <span className="font-medium capitalize text-[var(--color-text)]">{txForm.type}</span>
+              {" "}— to change type, delete and re-add.
+            </p>
+          )}
+
+          {/* Subscription presets — only for debits when adding */}
+          {!editingTxId && txForm.type === "debit" && subscriptions.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-xs font-medium text-[var(--color-text-muted)]">Quick fill from subscriptions</p>
+              <div className="flex flex-wrap gap-1.5">
+                {subscriptions.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setTxForm((f) => ({
+                      ...f,
+                      description: s.name,
+                      amount: String(s.amount),
+                    }))}
+                    className={cn(
+                      "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+                      txForm.description === s.name && txForm.amount === String(s.amount)
+                        ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                        : "border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/50 hover:text-[var(--color-text)]"
+                    )}
+                  >
+                    {s.name} · {formatCurrency(s.amount)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Source account selector when viewing ALL */}
           {effectiveId === "ALL" && (
@@ -469,7 +594,19 @@ export function CheckingPage() {
             error={txErrors.description}
           />
 
-          {txForm.type === "transfer" && (
+          {txForm.type !== "transfer" && (
+            <Select
+              label="Category (optional)"
+              options={[
+                { value: "", label: "— None —" },
+                ...CHECKING_CATEGORIES.map((c) => ({ value: c, label: c })),
+              ]}
+              value={txForm.category}
+              onChange={(e) => setTxForm((f) => ({ ...f, category: e.target.value }))}
+            />
+          )}
+
+          {!editingTxId && txForm.type === "transfer" && (
             <Select
               label="Transfer To"
               options={transferDestOptions}
@@ -494,10 +631,62 @@ export function CheckingPage() {
             onChange={(e) => setTxForm((f) => ({ ...f, notes: e.target.value }))}
           />
 
+          {!editingTxId && txForm.type === "debit" && debts.length > 0 && (
+            <div className="flex flex-col gap-2 rounded-[var(--radius-sm)] border border-[var(--color-border-subtle)] p-3">
+              <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={txForm.is_debt_payment}
+                  onChange={(e) => setTxForm((f) => ({
+                    ...f,
+                    is_debt_payment: e.target.checked,
+                    debt_id: e.target.checked ? (debts[0]?.id ?? "") : "",
+                  }))}
+                  className="accent-[var(--color-primary)]"
+                />
+                Apply as debt payment
+              </label>
+              {txForm.is_debt_payment && (
+                <Select
+                  label="Debt account"
+                  options={debts.map((d) => ({ value: d.id, label: d.name }))}
+                  value={txForm.debt_id}
+                  onChange={(e) => setTxForm((f) => ({ ...f, debt_id: e.target.value }))}
+                />
+              )}
+            </div>
+          )}
+
+          {!editingTxId && txForm.type === "debit" && fantasyAccounts.length > 0 && (
+            <div className="flex flex-col gap-2 rounded-[var(--radius-sm)] border border-[var(--color-border-subtle)] p-3">
+              <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={txForm.is_fantasy_deposit}
+                  onChange={(e) => setTxForm((f) => ({
+                    ...f,
+                    is_fantasy_deposit: e.target.checked,
+                    fantasy_account_id: e.target.checked ? (fantasyAccounts[0]?.id ?? "") : "",
+                  }))}
+                  className="accent-[var(--color-primary)]"
+                />
+                Tag as fantasy deposit
+              </label>
+              {txForm.is_fantasy_deposit && (
+                <Select
+                  label="Fantasy account"
+                  options={fantasyAccounts.map((a) => ({ value: a.id, label: a.name }))}
+                  value={txForm.fantasy_account_id}
+                  onChange={(e) => setTxForm((f) => ({ ...f, fantasy_account_id: e.target.value }))}
+                />
+              )}
+            </div>
+          )}
+
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="outline" size="sm" onClick={() => setTxDialogOpen(false)}>Cancel</Button>
             <Button size="sm" onClick={handleSaveTx} disabled={txSaving}>
-              {txSaving ? "Saving…" : "Add Transaction"}
+              {txSaving ? "Saving…" : editingTxId ? "Save Changes" : "Add Transaction"}
             </Button>
           </div>
         </div>

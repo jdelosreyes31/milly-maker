@@ -1,24 +1,28 @@
 import { useState, useEffect, useCallback } from "react";
 import { useDb } from "./useDb.js";
-import type { Debt } from "../queries/debts.js";
+import type { Debt, DebtLogEntry } from "../queries/debts.js";
 import {
   getAllDebts,
+  getAllDebtLog,
   insertDebt,
   updateDebt,
   deleteDebt,
   insertDebtPayment,
+  insertDebtCharge,
 } from "../queries/debts.js";
 
 export function useDebts() {
   const { conn } = useDb();
   const [debts, setDebts] = useState<Debt[]>([]);
+  const [debtLog, setDebtLog] = useState<DebtLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!conn) return;
     setLoading(true);
-    const data = await getAllDebts(conn);
+    const [data, log] = await Promise.all([getAllDebts(conn), getAllDebtLog(conn)]);
     setDebts(data);
+    setDebtLog(log);
     setLoading(false);
   }, [conn]);
 
@@ -60,8 +64,17 @@ export function useDebts() {
     [conn, refresh]
   );
 
+  const addCharge = useCallback(
+    async (data: Parameters<typeof insertDebtCharge>[1]) => {
+      if (!conn) return;
+      await insertDebtCharge(conn, data);
+      await refresh();
+    },
+    [conn, refresh]
+  );
+
   const totalDebt = debts.reduce((s, d) => s + d.current_balance, 0);
   const totalMinPayment = debts.reduce((s, d) => s + d.minimum_payment, 0);
 
-  return { debts, loading, refresh, add, edit, remove, addPayment, totalDebt, totalMinPayment };
+  return { debts, debtLog, loading, refresh, add, edit, remove, addPayment, addCharge, totalDebt, totalMinPayment };
 }

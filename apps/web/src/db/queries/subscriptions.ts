@@ -125,11 +125,55 @@ export async function updateSubscription(
   `);
 }
 
-export async function deleteSubscription(
+export async function cancelSubscription(
   conn: AsyncDuckDBConnection,
   id: string
 ): Promise<void> {
   await conn.query(`UPDATE subscriptions SET is_active = false WHERE id = '${id}'`);
+}
+
+/** @deprecated use cancelSubscription — kept for any existing callers */
+export const deleteSubscription = cancelSubscription;
+
+export async function restoreSubscription(
+  conn: AsyncDuckDBConnection,
+  id: string
+): Promise<void> {
+  await conn.query(`UPDATE subscriptions SET is_active = true WHERE id = '${id}'`);
+}
+
+export async function hardDeleteSubscription(
+  conn: AsyncDuckDBConnection,
+  id: string
+): Promise<void> {
+  await conn.query(`DELETE FROM subscriptions WHERE id = '${id}'`);
+}
+
+export async function getCancelledSubscriptions(
+  conn: AsyncDuckDBConnection
+): Promise<Subscription[]> {
+  const result = await conn.query(`
+    SELECT
+      s.id,
+      s.name,
+      s.amount::DOUBLE       AS amount,
+      s.billing_cycle,
+      s.billing_day,
+      s.source_type,
+      s.source_account_id,
+      COALESCE(ca.name, sa.name, d.name) AS source_account_name,
+      s.category,
+      s.is_active,
+      s.notes,
+      s.created_at::VARCHAR  AS created_at
+    FROM subscriptions s
+    LEFT JOIN checking_accounts ca ON s.source_type = 'checking' AND s.source_account_id = ca.id
+    LEFT JOIN savings_accounts  sa ON s.source_type = 'savings'  AND s.source_account_id = sa.id
+    LEFT JOIN debts              d  ON s.source_type = 'debt'     AND s.source_account_id = d.id
+    WHERE s.is_active = false
+    ORDER BY s.created_at DESC
+  `);
+  return result.toArray() as unknown as Subscription[];
 }
 
 function esc(s: string): string {

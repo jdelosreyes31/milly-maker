@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle, StatCard, formatCurrency } fr
 import { useDebts } from "@/db/hooks/useDebts.js";
 import { useInvestments } from "@/db/hooks/useInvestments.js";
 import { useDb } from "@/db/hooks/useDb.js";
-import { getNetWorthHistory } from "@/db/queries/investments.js";
+import { getNetWorthHistory, upsertNetWorthSnapshot } from "@/db/queries/investments.js";
 import { getCheckingBalanceSummary } from "@/db/queries/checking.js";
 import { getSavingsBalanceSummary } from "@/db/queries/savings.js";
 import type { SavingsAccountType } from "@/db/queries/savings.js";
@@ -27,22 +27,26 @@ export function DashboardPage() {
     { account_id: string; account_name: string; account_type: SavingsAccountType; apr: number; current_balance: number }[]
   >([]);
 
-  const netWorth = totalValue - totalDebt;
   const totalChecking = checkingAccounts.reduce((s, a) => s + a.current_balance, 0);
   const totalSavings = savingsAccounts.reduce((s, a) => s + a.current_balance, 0);
+  const netWorth = totalChecking + totalSavings + totalValue - totalDebt;
 
   useEffect(() => {
     if (!conn) return;
-    void getNetWorthHistory(conn).then((data) =>
-      setNetWorthHistory(data.map((d) => ({ snapshot_date: d.snapshot_date, net_worth: d.net_worth })))
+    // Write today's snapshot first so the chart always has a current data point,
+    // then reload history so any newly written point is reflected immediately.
+    void upsertNetWorthSnapshot(conn).then(() =>
+      getNetWorthHistory(conn).then((data) =>
+        setNetWorthHistory(data.map((d) => ({ snapshot_date: d.snapshot_date, net_worth: d.net_worth })))
+      )
     );
-  }, [conn, totalValue, totalDebt]);
+  }, [conn, totalValue, totalDebt, totalChecking, totalSavings]);
 
   useEffect(() => {
     if (!conn) return;
     void getCheckingBalanceSummary(conn).then(setCheckingAccounts);
     void getSavingsBalanceSummary(conn).then(setSavingsAccounts);
-  }, [conn]);
+  }, [conn, totalDebt]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -92,9 +96,9 @@ export function DashboardPage() {
         <Card>
           <CardHeader><CardTitle>Net Worth Over Time</CardTitle></CardHeader>
           <CardContent>
-            {netWorthHistory.length < 2 ? (
+            {netWorthHistory.length === 0 ? (
               <div className="flex h-40 items-center justify-center text-sm text-[var(--color-text-muted)]">
-                Update your investments and debts weekly to see your trend here.
+                Loading…
               </div>
             ) : (
               <ResponsiveContainer width="100%" height={200}>

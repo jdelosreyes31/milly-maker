@@ -72,6 +72,8 @@ export interface FantasyBalanceSummary {
   current_balance: number;
   total_deposited: number;
   total_cashout: number;
+  net_betting_pnl: number;
+  orphan_linked_in: number; // checking links with no matching fantasy_tx (old manual links)
 }
 
 // ── Accounts ──────────────────────────────────────────────────────────────────
@@ -155,18 +157,37 @@ export async function getFantasyBalanceSummary(
       a.starting_date::VARCHAR AS starting_date,
       a.end_date::VARCHAR AS end_date,
       COALESCE(SUM(CASE WHEN t.type = 'deposit' THEN t.amount ELSE 0.0 END), 0.0)::DOUBLE AS total_deposited,
-      COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0.0 END), 0.0)::DOUBLE AS total_cashout
+      COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0.0 END), 0.0)::DOUBLE AS total_cashout,
+      COALESCE(bs.net_betting_pnl, 0.0)::DOUBLE AS net_betting_pnl,
+      COALESCE(orphan.orphan_linked_in, 0.0)::DOUBLE AS orphan_linked_in
     FROM fantasy_accounts a
     LEFT JOIN fantasy_transactions t ON t.account_id = a.id
+    LEFT JOIN (
+      SELECT account_id,
+             SUM(total_settled - total_bet)::DOUBLE AS net_betting_pnl
+      FROM fantasy_bet_sessions
+      WHERE total_settled IS NOT NULL
+      GROUP BY account_id
+    ) bs ON bs.account_id = a.id
+    LEFT JOIN (
+      SELECT cfl.fantasy_account_id,
+             SUM(ct.amount)::DOUBLE AS orphan_linked_in
+      FROM checking_fantasy_links cfl
+      JOIN checking_transactions ct ON cfl.checking_tx_id = ct.id
+      WHERE cfl.fantasy_tx_id IS NULL
+      GROUP BY cfl.fantasy_account_id
+    ) orphan ON orphan.fantasy_account_id = a.id
     WHERE a.is_active = true
-    GROUP BY a.id, a.name, a.platform_type, a.starting_balance, a.starting_date, a.end_date, a.created_at
+    GROUP BY a.id, a.name, a.platform_type, a.starting_balance, a.starting_date, a.end_date, a.created_at, bs.net_betting_pnl, orphan.orphan_linked_in
     ORDER BY a.created_at ASC
   `);
 
   const rows = result.toArray() as unknown as Omit<FantasyBalanceSummary, "current_balance">[];
   return rows.map((r) => ({
     ...r,
-    current_balance: Math.round((r.starting_balance + r.total_deposited - r.total_cashout) * 100) / 100,
+    current_balance: Math.round(
+      (r.starting_balance + r.total_deposited + r.orphan_linked_in - r.total_cashout + r.net_betting_pnl) * 100
+    ) / 100,
   }));
 }
 
@@ -203,7 +224,7 @@ export async function insertFantasyTransaction(
     transaction_date: string;
     notes?: string;
   }
-): Promise<void> {
+): Promise<string> {
   const id = nanoid();
   await conn.query(`
     INSERT INTO fantasy_transactions
@@ -214,6 +235,7 @@ export async function insertFantasyTransaction(
       ${data.notes ? `'${esc(data.notes)}'` : "NULL"}
     )
   `);
+  return id;
 }
 
 export async function deleteFantasyTransaction(
@@ -382,6 +404,244 @@ export async function deleteFantasySeason(
   id: string
 ): Promise<void> {
   await conn.query(`DELETE FROM fantasy_seasons WHERE id = '${id}'`);
+}
+
+// ── Contests ──────────────────────────────────────────────────────────────────
+
+export interface FantasyContest {
+  id: string;
+  account_id: string;
+  account_name: string;
+  description: string;
+  entry_fee: number;
+  contest_size: number | null;
+  finish_position: number | null;
+  winnings: number | null;
+  placed_date: string;
+  settled_date: string | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export async function getFantasyContests(
+  conn: AsyncDuckDBConnection,
+  accountId: string
+): Promise<FantasyContest[]> {
+  const where = accountId === "ALL"
+    ? `a.platform_type != 'fantasy_league'`
+    : `c.account_id = '${accountId}'`;
+  const result = await conn.query(`
+    SELECT
+      c.id, c.account_id, a.name AS account_name,
+      c.description,
+      c.entry_fee::DOUBLE        AS entry_fee,
+      c.contest_size,
+      c.finish_position,
+      c.winnings::DOUBLE         AS winnings,
+      c.placed_date::VARCHAR     AS placed_date,
+      c.settled_date::VARCHAR    AS settled_date,
+      c.notes,
+      c.created_at::VARCHAR      AS created_at
+    FROM fantasy_contests c
+    JOIN fantasy_accounts a ON c.account_id = a.id
+    WHERE ${where}
+    ORDER BY c.placed_date DESC, c.created_at DESC
+  `);
+  return result.toArray() as unknown as FantasyContest[];
+}
+
+export async function insertFantasyContest(
+  conn: AsyncDuckDBConnection,
+  data: {
+    account_id: string;
+    description: string;
+    entry_fee: number;
+    contest_size?: number;
+    finish_position?: number;
+    winnings?: number;
+    placed_date: string;
+    settled_date?: string;
+    notes?: string;
+  }
+): Promise<void> {
+  const id = nanoid();
+  await conn.query(`
+    INSERT INTO fantasy_contests
+      (id, account_id, description, entry_fee, contest_size, finish_position,
+       winnings, placed_date, settled_date, notes)
+    VALUES (
+      '${id}', '${data.account_id}', '${esc(data.description)}',
+      ${data.entry_fee},
+      ${data.contest_size != null ? data.contest_size : "NULL"},
+      ${data.finish_position != null ? data.finish_position : "NULL"},
+      ${data.winnings != null ? data.winnings : "NULL"},
+      '${data.placed_date}',
+      ${data.settled_date ? `'${data.settled_date}'` : "NULL"},
+      ${data.notes ? `'${esc(data.notes)}'` : "NULL"}
+    )
+  `);
+}
+
+export async function settleFantasyContest(
+  conn: AsyncDuckDBConnection,
+  id: string,
+  data: { finish_position?: number; winnings: number; settled_date: string }
+): Promise<void> {
+  const parts = [
+    `winnings = ${data.winnings}`,
+    `settled_date = '${data.settled_date}'`,
+  ];
+  if (data.finish_position != null) parts.push(`finish_position = ${data.finish_position}`);
+  await conn.query(`UPDATE fantasy_contests SET ${parts.join(", ")} WHERE id = '${id}'`);
+}
+
+export async function deleteFantasyContest(
+  conn: AsyncDuckDBConnection,
+  id: string
+): Promise<void> {
+  await conn.query(`DELETE FROM fantasy_contests WHERE id = '${id}'`);
+}
+
+// ── Bet Sessions ─────────────────────────────────────────────────────────────
+
+export interface FantasyBetSession {
+  id: string;
+  account_id: string;
+  account_name: string;
+  session_date: string;
+  total_bet: number;
+  total_settled: number | null; // null = open (not yet settled)
+  net: number | null;           // null when open
+  notes: string | null;
+  created_at: string;
+}
+
+export async function getBetSessions(
+  conn: AsyncDuckDBConnection,
+  accountId: string
+): Promise<FantasyBetSession[]> {
+  const where = accountId === "ALL"
+    ? `a.platform_type != 'fantasy_league'`
+    : `bs.account_id = '${accountId}'`;
+  const result = await conn.query(`
+    SELECT
+      bs.id, bs.account_id, a.name AS account_name,
+      bs.session_date::VARCHAR  AS session_date,
+      bs.total_bet::DOUBLE      AS total_bet,
+      bs.total_settled::DOUBLE  AS total_settled,
+      bs.notes,
+      bs.created_at::VARCHAR    AS created_at
+    FROM fantasy_bet_sessions bs
+    JOIN fantasy_accounts a ON bs.account_id = a.id
+    WHERE ${where}
+    ORDER BY bs.session_date DESC, bs.created_at DESC
+  `);
+  const rows = result.toArray() as unknown as Omit<FantasyBetSession, "net">[];
+  return rows.map((r) => ({
+    ...r,
+    net: r.total_settled != null
+      ? Math.round((r.total_settled - r.total_bet) * 100) / 100
+      : null,
+  }));
+}
+
+export async function insertBetSession(
+  conn: AsyncDuckDBConnection,
+  data: {
+    account_id: string;
+    session_date: string;
+    total_bet: number;
+    total_settled?: number; // optional — omit to create an open session
+    notes?: string;
+  }
+): Promise<void> {
+  const id = nanoid();
+  const settled = data.total_settled != null ? String(data.total_settled) : "NULL";
+  await conn.query(`
+    INSERT INTO fantasy_bet_sessions
+      (id, account_id, session_date, total_bet, total_settled, notes)
+    VALUES (
+      '${id}', '${data.account_id}', '${data.session_date}',
+      ${data.total_bet}, ${settled},
+      ${data.notes ? `'${esc(data.notes)}'` : "NULL"}
+    )
+  `);
+}
+
+export async function settleBetSession(
+  conn: AsyncDuckDBConnection,
+  id: string,
+  total_settled: number,
+): Promise<void> {
+  await conn.query(`
+    UPDATE fantasy_bet_sessions SET total_settled = ${total_settled} WHERE id = '${id}'
+  `);
+}
+
+export async function deleteBetSession(
+  conn: AsyncDuckDBConnection,
+  id: string
+): Promise<void> {
+  await conn.query(`DELETE FROM fantasy_bet_sessions WHERE id = '${id}'`);
+}
+
+// ── Checking → Fantasy funding links ─────────────────────────────────────────
+
+export interface FantasyFundingLink {
+  id: string;
+  checking_tx_id: string;
+  fantasy_account_id: string;
+  fantasy_account_name: string;
+  amount: number;
+  transaction_date: string;
+  description: string;
+  source_account_name: string;
+  notes: string | null;
+  created_at: string;
+}
+
+export async function insertFantasyLink(
+  conn: AsyncDuckDBConnection,
+  data: { checking_tx_id: string; fantasy_account_id: string; fantasy_tx_id?: string; notes?: string }
+): Promise<void> {
+  const id = nanoid();
+  const notes = data.notes ? `'${esc(data.notes)}'` : "NULL";
+  const fantasyTxId = data.fantasy_tx_id ? `'${data.fantasy_tx_id}'` : "NULL";
+  await conn.query(`
+    INSERT INTO checking_fantasy_links (id, checking_tx_id, fantasy_account_id, fantasy_tx_id, notes)
+    VALUES ('${id}', '${data.checking_tx_id}', '${data.fantasy_account_id}', ${fantasyTxId}, ${notes})
+  `);
+}
+
+export async function getAllFantasyLinks(
+  conn: AsyncDuckDBConnection
+): Promise<FantasyFundingLink[]> {
+  const result = await conn.query(`
+    SELECT
+      cfl.id,
+      cfl.checking_tx_id,
+      cfl.fantasy_account_id,
+      fa.name                             AS fantasy_account_name,
+      ct.amount::DOUBLE                   AS amount,
+      ct.transaction_date::VARCHAR        AS transaction_date,
+      ct.description,
+      ca.name                             AS source_account_name,
+      cfl.notes,
+      cfl.created_at::VARCHAR             AS created_at
+    FROM checking_fantasy_links cfl
+    JOIN checking_transactions ct  ON cfl.checking_tx_id     = ct.id
+    JOIN checking_accounts     ca  ON ct.account_id          = ca.id
+    JOIN fantasy_accounts      fa  ON cfl.fantasy_account_id = fa.id
+    ORDER BY ct.transaction_date DESC, cfl.created_at DESC
+  `);
+  return result.toArray() as unknown as FantasyFundingLink[];
+}
+
+export async function deleteFantasyLink(
+  conn: AsyncDuckDBConnection,
+  id: string
+): Promise<void> {
+  await conn.query(`DELETE FROM checking_fantasy_links WHERE id = '${id}'`);
 }
 
 function esc(s: string): string {

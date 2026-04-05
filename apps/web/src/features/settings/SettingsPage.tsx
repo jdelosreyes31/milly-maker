@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Eye, EyeOff, Download, Upload, Sparkles, Trash2 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, Input } from "@milly-maker/ui";
-import { getDb, resetDatabase } from "@/db/init.js";
+import { exportDatabase, importDatabase, resetDatabase } from "@/db/init.js";
 import { useDb } from "@/db/hooks/useDb.js";
 import { seedDatabase } from "@/db/seed.js";
 
@@ -30,9 +30,7 @@ export function SettingsPage() {
   async function handleExport() {
     setExporting(true);
     try {
-      const db = getDb();
-      const buffer = await db.copyFileToBuffer("opfs://milly-maker.db");
-      const blob = new Blob([buffer.buffer as ArrayBuffer], { type: "application/octet-stream" });
+      const blob = await exportDatabase();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -77,9 +75,7 @@ export function SettingsPage() {
     if (!file) return;
     setImportError(null);
     try {
-      const buffer = await file.arrayBuffer();
-      const db = getDb();
-      await db.registerFileBuffer("opfs://milly-maker.db", new Uint8Array(buffer));
+      await importDatabase(file);
       window.location.reload();
     } catch (err) {
       setImportError("Import failed: " + String(err));

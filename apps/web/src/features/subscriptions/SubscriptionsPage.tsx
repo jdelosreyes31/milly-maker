@@ -1,14 +1,14 @@
-import React, { useState, useEffect } from "react";
-import { Plus, Pencil, Trash2, RefreshCw } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { Plus, Pencil, Trash2, RefreshCw, Zap, Check, RotateCcw, ChevronDown, ChevronRight, Ban } from "lucide-react";
 import {
   Card, CardContent, CardHeader, CardTitle,
-  Badge, formatCurrency,
+  Badge, formatCurrency, cn,
 } from "@milly-maker/ui";
 import { useSubscriptions, toMonthly } from "@/db/hooks/useSubscriptions.js";
 import type { Subscription, BillingCycle, SubscriptionSourceType } from "@/db/hooks/useSubscriptions.js";
 import { useDb } from "@/db/hooks/useDb.js";
-import { getAllCheckingAccounts } from "@/db/queries/checking.js";
-import { getAllSavingsAccounts } from "@/db/queries/savings.js";
+import { getAllCheckingAccounts, insertTransaction } from "@/db/queries/checking.js";
+import { getAllSavingsAccounts, insertSavingsTransaction } from "@/db/queries/savings.js";
 import { getAllDebts } from "@/db/queries/debts.js";
 
 // ── Source account options ──────────────────────────────────────────────────
@@ -67,14 +67,49 @@ const CATEGORIES = [
 
 export function SubscriptionsPage() {
   const { conn } = useDb();
-  const { subscriptions, totalMonthly, addSubscription, editSubscription, removeSubscription } =
-    useSubscriptions();
+  const {
+    subscriptions, cancelledSubscriptions, totalMonthly,
+    addSubscription, editSubscription, removeSubscription,
+    restoreSubscription, permanentlyDelete,
+  } = useSubscriptions();
 
   const [sourceOptions, setSourceOptions] = useState<SourceOption[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [errors, setErrors] = useState<Partial<FormState>>({});
+  const [paying, setPaying] = useState<Set<string>>(new Set());
+  const [paid, setPaid] = useState<Set<string>>(new Set());
+  const [showCancelled, setShowCancelled] = useState(false);
+
+  const handlePay = useCallback(async (sub: Subscription) => {
+    if (!conn || paying.has(sub.id)) return;
+    const today = new Date().toISOString().slice(0, 10);
+    setPaying((s) => new Set(s).add(sub.id));
+    try {
+      if (sub.source_type === "checking") {
+        await insertTransaction(conn, {
+          account_id: sub.source_account_id,
+          type: "debit",
+          amount: sub.amount,
+          description: sub.name,
+          transaction_date: today,
+        });
+      } else if (sub.source_type === "savings") {
+        await insertSavingsTransaction(conn, {
+          account_id: sub.source_account_id,
+          type: "withdrawal",
+          amount: sub.amount,
+          description: sub.name,
+          transaction_date: today,
+        });
+      }
+      setPaid((s) => new Set(s).add(sub.id));
+      setTimeout(() => setPaid((s) => { const n = new Set(s); n.delete(sub.id); return n; }), 2000);
+    } finally {
+      setPaying((s) => { const n = new Set(s); n.delete(sub.id); return n; });
+    }
+  }, [conn, paying]);
 
   // Load source accounts once
   useEffect(() => {
@@ -146,9 +181,17 @@ export function SubscriptionsPage() {
     setDialogOpen(false);
   }
 
-  async function handleDelete(id: string) {
-    if (!confirm("Remove this subscription?")) return;
+  async function handleCancel(id: string) {
     await removeSubscription(id);
+  }
+
+  async function handleRestore(id: string) {
+    await restoreSubscription(id);
+  }
+
+  async function handleHardDelete(id: string) {
+    if (!confirm("Permanently delete this subscription? This cannot be undone.")) return;
+    await permanentlyDelete(id);
   }
 
   const totalYearly = totalMonthly * 12;
@@ -230,6 +273,23 @@ export function SubscriptionsPage() {
                       </td>
                       <td className="py-3">
                         <div className="flex items-center justify-end gap-1">
+                          {sub.source_type !== "debt" && (
+                            <button
+                              onClick={() => void handlePay(sub)}
+                              disabled={paying.has(sub.id)}
+                              title="Log payment now"
+                              className={cn(
+                                "flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors",
+                                paid.has(sub.id)
+                                  ? "bg-[var(--color-success)]/15 text-[var(--color-success)]"
+                                  : "text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10"
+                              )}
+                            >
+                              {paid.has(sub.id)
+                                ? <><Check size={12} /> Paid</>
+                                : <><Zap size={12} /> Pay</>}
+                            </button>
+                          )}
                           <button
                             onClick={() => openEdit(sub)}
                             className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-raised)] hover:text-[var(--color-text)] transition-colors"
@@ -237,10 +297,11 @@ export function SubscriptionsPage() {
                             <Pencil size={13} />
                           </button>
                           <button
-                            onClick={() => void handleDelete(sub.id)}
-                            className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-danger)]/10 hover:text-[var(--color-danger)] transition-colors"
+                            onClick={() => void handleCancel(sub.id)}
+                            title="Cancel subscription"
+                            className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-warning)]/10 hover:text-[var(--color-warning)] transition-colors"
                           >
-                            <Trash2 size={13} />
+                            <Ban size={13} />
                           </button>
                         </div>
                       </td>
@@ -252,6 +313,75 @@ export function SubscriptionsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Cancelled subscriptions */}
+      {cancelledSubscriptions.length > 0 && (
+        <div>
+          <button
+            onClick={() => setShowCancelled((v) => !v)}
+            className="flex items-center gap-2 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors mb-2"
+          >
+            {showCancelled
+              ? <ChevronDown size={14} />
+              : <ChevronRight size={14} />}
+            Cancelled ({cancelledSubscriptions.length})
+          </button>
+
+          {showCancelled && (
+            <Card>
+              <CardContent className="pt-4">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--color-border)] text-left text-xs text-[var(--color-text-muted)]">
+                      <th className="pb-2 font-medium">Name</th>
+                      <th className="pb-2 font-medium">Amount</th>
+                      <th className="pb-2 font-medium">Cycle</th>
+                      <th className="pb-2 font-medium">Source</th>
+                      <th className="pb-2 font-medium">Category</th>
+                      <th className="pb-2" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cancelledSubscriptions.map((sub) => (
+                      <tr key={sub.id} className="border-b border-[var(--color-border-subtle)] last:border-0 opacity-60">
+                        <td className="py-3 font-medium line-through">{sub.name}</td>
+                        <td className="py-3 tabular-nums">{formatCurrency(sub.amount)}</td>
+                        <td className="py-3">
+                          <Badge variant="default">{CYCLE_LABELS[sub.billing_cycle]}</Badge>
+                        </td>
+                        <td className="py-3 text-[var(--color-text-muted)]">
+                          {sub.source_account_name ?? sub.source_account_id}
+                        </td>
+                        <td className="py-3 text-[var(--color-text-muted)]">
+                          {sub.category ?? "—"}
+                        </td>
+                        <td className="py-3">
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              onClick={() => void handleRestore(sub.id)}
+                              title="Restore subscription"
+                              className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-[var(--color-success)] hover:bg-[var(--color-success)]/10 transition-colors"
+                            >
+                              <RotateCcw size={12} /> Restore
+                            </button>
+                            <button
+                              onClick={() => void handleHardDelete(sub.id)}
+                              title="Permanently delete"
+                              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-danger)]/10 hover:text-[var(--color-danger)] transition-colors"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
 
       {/* Add / Edit dialog */}
       {dialogOpen && (

@@ -1,11 +1,29 @@
 import React, { useEffect, useState, useMemo } from "react";
-import { Sankey, ResponsiveContainer } from "recharts";
+import { Sankey, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Cell } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle, formatCurrency } from "@milly-maker/ui";
 import { useDb } from "@/db/hooks/useDb.js";
 import { useSubscriptions, toMonthly } from "@/db/hooks/useSubscriptions.js";
 import { useDebts } from "@/db/hooks/useDebts.js";
-import { getMonthlyCreditTotals } from "@/db/queries/checking.js";
+import { getMonthlyCreditTotals, getSpendingByCategory } from "@/db/queries/checking.js";
 import { loadPlanningSettings } from "@/features/planning/PlanningPage.js";
+
+const CATEGORY_COLORS: Record<string, string> = {
+  "Housing":        "#6366f1",
+  "Food & Dining":  "#f59e0b",
+  "Transportation": "#3b82f6",
+  "Entertainment":  "#ec4899",
+  "Shopping":       "#8b5cf6",
+  "Healthcare":     "#10b981",
+  "Utilities":      "#0ea5e9",
+  "Personal Care":  "#f43f5e",
+  "Travel":         "#14b8a6",
+  "Education":      "#f97316",
+  "Subscriptions":  "#f43f5e",
+  "Debt Payment":   "#f79009",
+  "Transfer":       "#94a3b8",
+  "Other":          "#64748b",
+  "Uncategorized":  "#cbd5e1",
+};
 
 // ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -127,11 +145,18 @@ export function ReportsPage() {
   const { subscriptions } = useSubscriptions();
   const { debts } = useDebts();
   const [credits, setCredits] = useState<{ month: string; total: number }[]>([]);
+  const [categorySpend, setCategorySpend] = useState<{ category: string; total: number }[]>([]);
+  const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().slice(0, 7));
 
   useEffect(() => {
     if (!conn) return;
     void getMonthlyCreditTotals(conn).then(setCredits);
   }, [conn]);
+
+  useEffect(() => {
+    if (!conn) return;
+    void getSpendingByCategory(conn, selectedMonth).then(setCategorySpend);
+  }, [conn, selectedMonth]);
 
   const settings = useMemo(() => loadPlanningSettings(), []);
 
@@ -312,6 +337,107 @@ export function ReportsPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Spending by Category */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>Spending by Category</CardTitle>
+              <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
+                Actual debit transactions grouped by category
+              </p>
+            </div>
+            <input
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2 py-1 text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+            />
+          </div>
+        </CardHeader>
+        <CardContent>
+          {categorySpend.length === 0 ? (
+            <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+              No categorized debit transactions for this month yet.
+              Add a category when logging transactions in Checking.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-6 lg:flex-row">
+              {/* Bar chart */}
+              <div className="flex-1">
+                <ResponsiveContainer width="100%" height={Math.max(200, categorySpend.length * 40)}>
+                  <BarChart
+                    data={categorySpend}
+                    layout="vertical"
+                    margin={{ top: 0, right: 16, bottom: 0, left: 100 }}
+                    barCategoryGap="20%"
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-subtle)" horizontal={false} />
+                    <XAxis
+                      type="number"
+                      tickFormatter={(v) => `$${v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v}`}
+                      tick={{ fontSize: 11, fill: "var(--color-text-muted)" }}
+                      axisLine={false} tickLine={false}
+                    />
+                    <YAxis
+                      type="category" dataKey="category"
+                      tick={{ fontSize: 11, fill: "var(--color-text)" }}
+                      axisLine={false} tickLine={false} width={96}
+                    />
+                    <Tooltip
+                      formatter={(v: number) => [formatCurrency(v), "Spent"]}
+                      contentStyle={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius-sm)", fontSize: 12 }}
+                    />
+                    <Bar dataKey="total" radius={[0, 4, 4, 0]}>
+                      {categorySpend.map((entry) => (
+                        <Cell
+                          key={entry.category}
+                          fill={CATEGORY_COLORS[entry.category] ?? "#6366f1"}
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Summary table */}
+              <div className="w-full lg:w-56 shrink-0">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--color-border-subtle)] text-xs text-[var(--color-text-muted)]">
+                      <th className="pb-2 text-left font-medium">Category</th>
+                      <th className="pb-2 text-right font-medium">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--color-border-subtle)]">
+                    {categorySpend.map((row) => (
+                      <tr key={row.category}>
+                        <td className="py-1.5 flex items-center gap-1.5">
+                          <span
+                            className="h-2 w-2 rounded-full shrink-0"
+                            style={{ backgroundColor: CATEGORY_COLORS[row.category] ?? "#6366f1" }}
+                          />
+                          {row.category}
+                        </td>
+                        <td className="py-1.5 text-right tabular-nums font-medium">
+                          {formatCurrency(row.total)}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr className="border-t border-[var(--color-border)]">
+                      <td className="pt-2 text-xs font-semibold text-[var(--color-text-muted)]">Total</td>
+                      <td className="pt-2 text-right tabular-nums font-bold">
+                        {formatCurrency(categorySpend.reduce((s, r) => s + r.total, 0))}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

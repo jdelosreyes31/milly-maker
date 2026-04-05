@@ -102,12 +102,42 @@ export async function getNetWorthHistory(
 
 export async function upsertNetWorthSnapshot(conn: AsyncDuckDBConnection): Promise<void> {
   await conn.query(`
-    INSERT OR REPLACE INTO net_worth_snapshots (id, snapshot_date, total_assets, total_debts)
+    INSERT INTO net_worth_snapshots (id, snapshot_date, total_assets, total_debts)
     SELECT
       '${nanoid()}',
       current_date,
-      COALESCE((SELECT SUM(current_value) FROM investments WHERE is_active = true), 0),
+      -- Investments
+      COALESCE((SELECT SUM(current_value) FROM investments WHERE is_active = true), 0)
+      -- Checking accounts (starting_balance + all credits - all debits/transfers)
+      + COALESCE((
+          SELECT SUM(bal.b) FROM (
+            SELECT a.starting_balance + COALESCE(SUM(
+              CASE WHEN t.type = 'credit' THEN t.amount
+                   WHEN t.type IN ('debit', 'transfer') THEN -t.amount
+                   ELSE 0 END
+            ), 0) AS b
+            FROM checking_accounts a
+            LEFT JOIN checking_transactions t ON t.account_id = a.id
+            GROUP BY a.id, a.starting_balance
+          ) bal
+        ), 0)
+      -- Savings accounts (starting_balance + all deposits - all withdrawals)
+      + COALESCE((
+          SELECT SUM(bal.b) FROM (
+            SELECT a.starting_balance + COALESCE(SUM(
+              CASE WHEN t.type = 'deposit' THEN t.amount
+                   WHEN t.type = 'withdrawal' THEN -t.amount
+                   ELSE 0 END
+            ), 0) AS b
+            FROM savings_accounts a
+            LEFT JOIN savings_transactions t ON t.account_id = a.id
+            GROUP BY a.id, a.starting_balance
+          ) bal
+        ), 0),
       COALESCE((SELECT SUM(current_balance) FROM debts WHERE is_active = true), 0)
+    ON CONFLICT (snapshot_date) DO UPDATE SET
+      total_assets = EXCLUDED.total_assets,
+      total_debts  = EXCLUDED.total_debts
   `);
 }
 
