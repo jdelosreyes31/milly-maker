@@ -1085,12 +1085,20 @@ export function FantasyPage() {
   async function handleSettleFuture(id: string, status: FutureStatus) {
     const future = openFutures.find((f) => f.id === id);
     const today = new Date().toISOString().slice(0, 10);
+    let depositAmount: number | null = null;
+    if (status === "won" && future && future.potential_payout != null) {
+      const accountStart = balanceSummary.find((b) => b.account_id === future.account_id)?.starting_date;
+      // Post-start futures had their stake deducted from balance; deposit only profit to avoid double-counting.
+      // Pre-start futures were never deducted; deposit the full payout as before.
+      const isPostStart = accountStart != null && future.placed_date > accountStart;
+      depositAmount = isPostStart ? future.potential_payout - future.stake : future.potential_payout;
+    }
     await settleFuture(id, status,
-      status === "won" && future && future.potential_payout != null
+      depositAmount != null && depositAmount > 0
         ? {
-            account_id: future.account_id,
-            amount: future.potential_payout,
-            description: `Win: ${future.description}`,
+            account_id: future!.account_id,
+            amount: depositAmount,
+            description: `Win: ${future!.description}`,
             date: today,
           }
         : undefined

@@ -74,6 +74,7 @@ export interface FantasyBalanceSummary {
   total_cashout: number;
   net_betting_pnl: number;
   orphan_linked_in: number; // checking links with no matching fantasy_tx (old manual links)
+  open_futures_stake: number; // stakes of open futures placed after account start date
 }
 
 // ── Accounts ──────────────────────────────────────────────────────────────────
@@ -159,7 +160,8 @@ export async function getFantasyBalanceSummary(
       COALESCE(SUM(CASE WHEN t.type = 'deposit' THEN t.amount ELSE 0.0 END), 0.0)::DOUBLE AS total_deposited,
       COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0.0 END), 0.0)::DOUBLE AS total_cashout,
       COALESCE(bs.net_betting_pnl, 0.0)::DOUBLE AS net_betting_pnl,
-      COALESCE(orphan.orphan_linked_in, 0.0)::DOUBLE AS orphan_linked_in
+      COALESCE(orphan.orphan_linked_in, 0.0)::DOUBLE AS orphan_linked_in,
+      COALESCE(of_.open_futures_stake, 0.0)::DOUBLE AS open_futures_stake
     FROM fantasy_accounts a
     LEFT JOIN fantasy_transactions t ON t.account_id = a.id
     LEFT JOIN (
@@ -177,8 +179,17 @@ export async function getFantasyBalanceSummary(
       WHERE cfl.fantasy_tx_id IS NULL
       GROUP BY cfl.fantasy_account_id
     ) orphan ON orphan.fantasy_account_id = a.id
+    LEFT JOIN (
+      SELECT f.account_id,
+             SUM(f.stake)::DOUBLE AS open_futures_stake
+      FROM fantasy_futures f
+      JOIN fantasy_accounts fa ON f.account_id = fa.id
+      WHERE f.status = 'open'
+        AND f.placed_date > fa.starting_date
+      GROUP BY f.account_id
+    ) of_ ON of_.account_id = a.id
     WHERE a.is_active = true
-    GROUP BY a.id, a.name, a.platform_type, a.starting_balance, a.starting_date, a.end_date, a.created_at, bs.net_betting_pnl, orphan.orphan_linked_in
+    GROUP BY a.id, a.name, a.platform_type, a.starting_balance, a.starting_date, a.end_date, a.created_at, bs.net_betting_pnl, orphan.orphan_linked_in, of_.open_futures_stake
     ORDER BY a.created_at ASC
   `);
 
@@ -186,7 +197,7 @@ export async function getFantasyBalanceSummary(
   return rows.map((r) => ({
     ...r,
     current_balance: Math.round(
-      (r.starting_balance + r.total_deposited + r.orphan_linked_in - r.total_cashout + r.net_betting_pnl) * 100
+      (r.starting_balance + r.total_deposited + r.orphan_linked_in - r.total_cashout + r.net_betting_pnl - r.open_futures_stake) * 100
     ) / 100,
   }));
 }
