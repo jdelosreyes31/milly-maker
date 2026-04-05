@@ -945,10 +945,17 @@ export function FantasyPage() {
 
   // Totals for stat cards
   const perfStats = useMemo(() => {
+    // Win payouts from settled futures are stored as type='deposit' with description "Win: …".
+    // They are earnings (platform → user), not bank→platform transfers, so they are excluded
+    // from "Total Deposited" but included in P&L metrics.
+    const sbWinPayouts = transactions
+      .filter(t => !isLeague(t.platform_type) && t.type === "deposit" && t.description.startsWith("Win:"))
+      .reduce((s, t) => s + t.amount, 0);
+
     // Sportsbook/DFS: direct deposits + linked deposits that created a fantasy tx are in total_deposited.
     // Orphan links (old manual links with no fantasy_tx_id) are counted separately via orphan_linked_in.
     // starting_balance is an account snapshot (origin point), not a P&L event.
-    const sbTotalIn  = sbSummary.reduce((s, a) => s + a.total_deposited + a.orphan_linked_in, 0);
+    const sbTotalIn  = sbSummary.reduce((s, a) => s + a.total_deposited + a.orphan_linked_in, 0) - sbWinPayouts;
     const sbTotalOut = sbSummary.reduce((s, a) => s + a.total_cashout, 0);
     const inAccounts = sbSummary.reduce((s, a) => s + a.current_balance, 0);
 
@@ -961,13 +968,14 @@ export function FantasyPage() {
 
     const totalIn  = sbTotalIn + leagueBuyIn;
     const totalOut = sbTotalOut + leagueWon;
-    // Realized P&L: what you've cashed out/won minus what you've put in.
-    // "Still in accounts" is shown separately — it isn't counted here so that
-    // brand-new accounts with only a starting_balance don't distort the number.
-    const netPnL = totalOut - totalIn;
-    const bettingPnL = sbSummary.reduce((s, a) => s + (a.net_betting_pnl ?? 0), 0);
+    // Net P&L: bet session wins + future win payouts − open stakes + league outcomes.
+    // Deposits and cashouts are neutral fund movements and excluded.
+    // starting_balance is pre-existing capital and excluded.
+    const bettingPnL = sbSummary.reduce((s, a) => s + (a.net_betting_pnl ?? 0), 0) + sbWinPayouts;
+    const sbOpenFuturesStake = sbSummary.reduce((s, a) => s + a.open_futures_stake, 0);
+    const netPnL = bettingPnL - sbOpenFuturesStake + leagueWon - leagueBuyIn;
     return { totalIn, totalOut, inAccounts, netPnL, bettingPnL };
-  }, [sbSummary, seasons]);
+  }, [sbSummary, seasons, transactions]);
 
   // Monthly net per platform (for bar chart)
   const monthlyChartData = useMemo(() => {
@@ -976,7 +984,8 @@ export function FantasyPage() {
     for (const tx of sbTxs) {
       const month = tx.transaction_date.slice(0, 7);
       const curr = byMonth.get(month) ?? { dfs: 0, sportsbook: 0 };
-      const sign = tx.type === "cashout" ? 1 : -1;
+      const isWinPayout = tx.type === "deposit" && tx.description.startsWith("Win:");
+      const sign = (tx.type === "cashout" || isWinPayout) ? 1 : -1;
       const key = tx.platform_type === "dfs" ? "dfs" : "sportsbook";
       curr[key] += sign * tx.amount;
       byMonth.set(month, curr);
@@ -1000,7 +1009,8 @@ export function FantasyPage() {
     const byMonth = new Map<string, { DFS: number; Sportsbook: number; Combined: number }>();
     for (const tx of sbTxs) {
       const month = tx.transaction_date.slice(0, 7);
-      const sign = tx.type === "cashout" ? 1 : -1;
+      const isWinPayout = tx.type === "deposit" && tx.description.startsWith("Win:");
+      const sign = (tx.type === "cashout" || isWinPayout) ? 1 : -1;
       if (tx.platform_type === "dfs") dfsCum += sign * tx.amount;
       else sbCum += sign * tx.amount;
       byMonth.set(month, {
@@ -1414,7 +1424,7 @@ export function FantasyPage() {
                 )}>
                   {perfStats.netPnL >= 0 ? "+" : ""}{formatCurrency(perfStats.netPnL)}
                 </p>
-                <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">cashouts + balance − deposits</p>
+                <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">bet P&L − open stakes + league gains</p>
               </CardContent>
             </Card>
             <Card>
@@ -1450,7 +1460,7 @@ export function FantasyPage() {
                   )}>
                     {perfStats.bettingPnL >= 0 ? "+" : ""}{formatCurrency(perfStats.bettingPnL)}
                   </p>
-                  <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">net across all bet sessions</p>
+                  <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">bet sessions + future wins</p>
                 </CardContent>
               </Card>
             )}
