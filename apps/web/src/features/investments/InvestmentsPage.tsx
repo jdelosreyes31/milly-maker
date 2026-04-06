@@ -622,7 +622,13 @@ export function InvestmentsPage() {
 
       </>)}
       {view === "planning" && (
-        <InvestmentPlanningView holdings={holdings} totalValue={totalValue} />
+        <InvestmentPlanningView
+          holdings={holdings}
+          totalValue={totalValue}
+          cashAccountsTotal={investments
+            .filter((i) => i.account_type === "cash_account")
+            .reduce((s, i) => s + i.current_value, 0)}
+        />
       )}
 
       {/* ── Add / Edit Account Dialog ── */}

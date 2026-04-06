@@ -22,6 +22,7 @@ export const ACCOUNT_TYPES = [
   { value: "529", label: "529 (Education)" },
   { value: "crypto", label: "Crypto" },
   { value: "savings", label: "Savings" },
+  { value: "cash_account", label: "Cash Account" },
   { value: "other", label: "Other" },
 ];
 

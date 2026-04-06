@@ -1,12 +1,23 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Bot, AlertTriangle } from "lucide-react";
+import { Bot, AlertTriangle, Plus, Trash2 } from "lucide-react";
 import Anthropic from "@anthropic-ai/sdk";
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, formatCurrency } from "@milly-maker/ui";
 import { Link } from "@tanstack/react-router";
 import type { InvestmentHolding } from "@/db/queries/investments.js";
 import { ASSET_CLASSES } from "@/db/queries/investments.js";
+import { nanoid } from "@/lib/nanoid.js";
 
-const STORAGE_KEY = "investmentPlanAllocations";
+// ── Planned holding (localStorage only, never in DB) ──────────────────────────
+
+interface PlannedHolding {
+  id: string;
+  name: string;
+  ticker: string;
+  asset_class: string;
+}
+
+const PLAN_STORAGE_KEY = "investmentPlanAllocations";
+const PLANNED_HOLDINGS_KEY = "investmentPlanHoldings";
 
 interface StoredPlan {
   cash: string;
@@ -16,29 +27,70 @@ interface StoredPlan {
 
 function loadStoredPlan(): StoredPlan {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(PLAN_STORAGE_KEY);
     if (raw) return JSON.parse(raw) as StoredPlan;
   } catch { /* ignore */ }
   return { cash: "", monthlyContribution: "", allocations: {} };
 }
 
+function loadPlannedHoldings(): PlannedHolding[] {
+  try {
+    const raw = localStorage.getItem(PLANNED_HOLDINGS_KEY);
+    if (raw) return JSON.parse(raw) as PlannedHolding[];
+  } catch { /* ignore */ }
+  return [];
+}
+
+// ── Unified row type ──────────────────────────────────────────────────────────
+
+type PlanRow =
+  | (InvestmentHolding & { isPlanned: false })
+  | (PlannedHolding & { current_value: 0; isPlanned: true });
+
+// ── Props ─────────────────────────────────────────────────────────────────────
+
 interface Props {
   holdings: InvestmentHolding[];
   totalValue: number;
+  cashAccountsTotal: number;
 }
 
-export function InvestmentPlanningView({ holdings, totalValue }: Props) {
-  const [cash, setCash] = useState(() => loadStoredPlan().cash);
-  const [monthlyContribution, setMonthlyContribution] = useState(() => loadStoredPlan().monthlyContribution);
-  const [allocations, setAllocations] = useState<Record<string, string>>(() => loadStoredPlan().allocations);
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal }: Props) {
+  const [cash, setCash] = useState<string>(
+    () => loadStoredPlan().cash || (cashAccountsTotal > 0 ? String(cashAccountsTotal) : "")
+  );
+  const [monthlyContribution, setMonthlyContribution] = useState<string>(
+    () => loadStoredPlan().monthlyContribution
+  );
+  const [allocations, setAllocations] = useState<Record<string, string>>(
+    () => loadStoredPlan().allocations
+  );
+  const [plannedHoldings, setPlannedHoldings] = useState<PlannedHolding[]>(loadPlannedHoldings);
+
+  // Add planned holding form state
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newTicker, setNewTicker] = useState("");
+  const [newAssetClass, setNewAssetClass] = useState("stocks");
+  const [nameError, setNameError] = useState("");
+
+  // Analysis state
   const [analysis, setAnalysis] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const analysisEndRef = useRef<HTMLDivElement>(null);
 
+  // Persist plan inputs
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ cash, monthlyContribution, allocations }));
+    localStorage.setItem(PLAN_STORAGE_KEY, JSON.stringify({ cash, monthlyContribution, allocations }));
   }, [cash, monthlyContribution, allocations]);
+
+  // Persist planned holdings
+  useEffect(() => {
+    localStorage.setItem(PLANNED_HOLDINGS_KEY, JSON.stringify(plannedHoldings));
+  }, [plannedHoldings]);
 
   useEffect(() => {
     if (analysis) {
@@ -46,17 +98,26 @@ export function InvestmentPlanningView({ holdings, totalValue }: Props) {
     }
   }, [analysis]);
 
+  // ── Unified row list ────────────────────────────────────────────────────────
+
+  const allRows: PlanRow[] = [
+    ...holdings.map((h) => ({ ...h, isPlanned: false as const })),
+    ...plannedHoldings.map((p) => ({ ...p, current_value: 0 as const, isPlanned: true as const })),
+  ];
+
+  // ── Buy math ────────────────────────────────────────────────────────────────
+
   const cashNum = parseFloat(cash) || 0;
   const monthlyNum = parseFloat(monthlyContribution) || 0;
   const newTotal = totalValue + cashNum;
 
-  const rows = holdings.map((h) => {
-    const targetPct = parseFloat(allocations[h.id] ?? "") || 0;
-    const currentPct = totalValue > 0 ? (h.current_value / totalValue) * 100 : 0;
+  const rows = allRows.map((r) => {
+    const targetPct = parseFloat(allocations[r.id] ?? "") || 0;
+    const currentPct = totalValue > 0 ? (r.current_value / totalValue) * 100 : 0;
     const targetValue = newTotal * (targetPct / 100);
-    const rawBuy = Math.max(0, targetValue - h.current_value);
+    const rawBuy = Math.max(0, targetValue - r.current_value);
     const delta = targetPct - currentPct;
-    return { ...h, targetPct, currentPct, rawBuy, delta };
+    return { ...r, targetPct, currentPct, rawBuy, delta };
   });
 
   const totalRawBuy = rows.reduce((s, r) => s + r.rawBuy, 0);
@@ -70,8 +131,35 @@ export function InvestmentPlanningView({ holdings, totalValue }: Props) {
 
   const hasApiKey = !!localStorage.getItem("anthropicApiKey");
 
+  // ── Handlers ────────────────────────────────────────────────────────────────
+
   function setAllocation(id: string, value: string) {
     setAllocations((prev) => ({ ...prev, [id]: value }));
+  }
+
+  function handleAddPlanned() {
+    if (!newName.trim()) { setNameError("Name required"); return; }
+    const holding: PlannedHolding = {
+      id: nanoid(),
+      name: newName.trim(),
+      ticker: newTicker.trim(),
+      asset_class: newAssetClass,
+    };
+    setPlannedHoldings((prev) => [...prev, holding]);
+    setNewName("");
+    setNewTicker("");
+    setNewAssetClass("stocks");
+    setNameError("");
+    setShowAddForm(false);
+  }
+
+  function handleDeletePlanned(id: string) {
+    setPlannedHoldings((prev) => prev.filter((p) => p.id !== id));
+    setAllocations((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
   }
 
   async function handleAnalyze() {
@@ -91,19 +179,20 @@ export function InvestmentPlanningView({ holdings, totalValue }: Props) {
             r.delta < -1 ? "OVERWEIGHT" :
             "AT-WEIGHT";
           const unstarted = r.current_value === 0 && r.targetPct > 0 ? " [UNSTARTED]" : "";
+          const planned = r.isPlanned ? " [PLANNED]" : "";
           const ticker = r.ticker ? ` (${r.ticker})` : "";
           const assetLabel = ASSET_CLASSES.find((a) => a.value === r.asset_class)?.label ?? r.asset_class;
-          return `| ${r.name}${ticker} | ${assetLabel} | $${r.current_value.toFixed(2)} | ${r.currentPct.toFixed(1)}% | ${r.targetPct.toFixed(1)}% | ${r.delta > 0 ? "+" : ""}${r.delta.toFixed(1)}% | $${r.buy.toFixed(2)} | ${status}${unstarted} |`;
+          return `| ${r.name}${ticker} | ${assetLabel} | $${r.current_value.toFixed(2)} | ${r.currentPct.toFixed(1)}% | ${r.targetPct.toFixed(1)}% | ${r.delta > 0 ? "+" : ""}${r.delta.toFixed(1)}% | $${r.buy.toFixed(2)} | ${status}${unstarted}${planned} |`;
         })
         .join("\n");
 
       const unstartedPositions = rowsWithBuy.filter((r) => r.current_value === 0 && r.targetPct > 0);
-      const underweightPositions = rowsWithBuy.filter((r) => r.delta > 1);
+      const underweightPositions = rowsWithBuy.filter((r) => r.delta > 1 && r.current_value > 0);
       const overweightPositions = rowsWithBuy.filter((r) => r.delta < -1);
 
       const ladderSection =
         monthlyNum > 0
-          ? `\n\n**Contribution Ladder — $${monthlyNum.toFixed(2)}/month ($${(monthlyNum * 3).toFixed(2)} per quarter)**\n\nWalk me through 4 quarters (months 1–3, 4–6, 7–9, 10–12). For each quarter, reason about where you would deploy the $${(monthlyNum * 3).toFixed(2)} given how the portfolio has drifted since the initial deploy, which positions still need building, and when to initiate any unstarted positions. Don't just repeat the same allocation each quarter — think about what actually changes your recommendation quarter to quarter, and why.`
+          ? `\n\n**Contribution Ladder — $${monthlyNum.toFixed(2)}/month ($${(monthlyNum * 3).toFixed(2)} per quarter)**\n\nWalk me through 4 quarters (months 1–3, 4–6, 7–9, 10–12). For each quarter, reason about where you would deploy the $${(monthlyNum * 3).toFixed(2)} given how the portfolio has drifted since the initial deploy, which positions still need building, and when to initiate any unstarted or planned positions. Don't just repeat the same allocation each quarter — think about what actually changes your recommendation quarter to quarter, and why.`
           : "";
 
       const formatList = (items: typeof rowsWithBuy) =>
@@ -114,7 +203,7 @@ export function InvestmentPlanningView({ holdings, totalValue }: Props) {
       const userMessage =
         `I have $${cashNum.toFixed(2)} to invest today and will contribute $${monthlyNum.toFixed(2)}/month going forward. My total current portfolio value is $${totalValue.toFixed(2)}, and after this deploy it would be $${newTotal.toFixed(2)}.
 
-Here is my immediate investment plan:
+Here is my investment plan. Note: rows marked [PLANNED] are positions I intend to build but do not yet own. Rows marked [UNSTARTED] have a target allocation but zero current value.
 
 | Holding | Asset Class | Current Value | Current % | Target % | Delta | Planned Buy | Status |
 |---------|-------------|---------------|-----------|----------|-------|-------------|--------|
@@ -122,22 +211,22 @@ ${holdingRows}
 
 **Totals:** Current portfolio $${totalValue.toFixed(2)} | Cash to deploy $${cashNum.toFixed(2)} | Total planned buys $${totalBuy.toFixed(2)}
 
-**Underweight (need more capital):** ${formatList(underweightPositions)}
-**Overweight (above target):** ${formatList(overweightPositions)}
-**Unstarted (no current exposure, target > 0):** ${unstartedPositions.length > 0 ? unstartedPositions.map((r) => `${r.name}${r.ticker ? ` (${r.ticker})` : ""} — target ${r.targetPct}%`).join(", ") : "None"}
+**Underweight existing positions:** ${formatList(underweightPositions)}
+**Overweight positions:** ${formatList(overweightPositions)}
+**Unstarted / planned positions (no current exposure):** ${unstartedPositions.length > 0 ? unstartedPositions.map((r) => `${r.name}${r.ticker ? ` (${r.ticker})` : ""}${r.isPlanned ? " [planned]" : ""} — target ${r.targetPct}%`).join(", ") : "None"}
 
-Please review this as my portfolio manager. Reason through the plan — not just the arithmetic. For overweight positions, evaluate whether staying overweight is a defensible strategic choice rather than flagging it as wrong by default. For unstarted positions, tell me at what portfolio size or cash deployment level it would make practical sense to initiate each one — consider minimum meaningful lot sizes and whether the timing makes sense given what I'm building.${ladderSection}`;
+Please review this as my portfolio manager. Reason through the plan — not just the arithmetic. For overweight positions, evaluate whether staying overweight is a defensible strategic choice. For unstarted and planned positions, tell me at what portfolio size or cash deployment level it would make practical sense to initiate each one — consider minimum meaningful lot sizes and how they fit the overall build.${ladderSection}`;
 
       const systemPrompt =
-        `You are a seasoned portfolio manager conducting a full investment plan review. You have the user's complete current holdings, their target allocation, and the cash they intend to deploy. Your job is to reason through this plan the way a CFA would — not just validate the arithmetic.
+        `You are a seasoned portfolio manager conducting a full investment plan review. You have the user's complete current holdings, their intended future positions, their target allocation, and the cash they intend to deploy. Your job is to reason through this plan the way a CFA would — not just validate the arithmetic.
 
-Consider whether each position is underweight or overweight relative to target, whether the planned buys meaningfully close the gap, and whether going overweight on a specific name or asset class could be a valid strategic choice. A conviction overweight is not automatically wrong — evaluate it on its merits. Flag fractional-share situations as a practical note, not a veto. If a planned buy is too small to meaningfully move the needle, say so specifically.
+Consider whether each position is underweight or overweight relative to target, whether the planned buys meaningfully close the gap, and whether going overweight on a specific name or asset class could be a valid strategic choice. A conviction overweight is not automatically wrong — evaluate it on its merits. Flag fractional-share situations as a practical note, not a veto.
 
-For unstarted positions (zero current exposure, target > 0), reason about entry timing: at what portfolio size, cash level, or quarter does it make sense to initiate the position? Factor in lot sizes, the position's target weight, and how it fits the overall build.
+For positions the user hasn't yet initiated (marked [UNSTARTED] or [PLANNED]), reason about entry timing: at what portfolio size, cash level, or quarter does it make sense to start building that position? Consider lot sizes, target weight, and how the position fits the overall build strategy.
 
-If monthly contributions are provided, produce a 3-month-interval ladder for 4 quarters. For each quarter, reason about portfolio drift since the initial deploy — what's still underweight, what's shifted, and when to pull the trigger on unstarted positions. Your quarterly recommendations should evolve, not just repeat the same instruction.
+If monthly contributions are provided, produce a 3-month-interval ladder for 4 quarters. For each quarter, reason about portfolio drift since the initial deploy — what's still underweight, what's shifted, and when to pull the trigger on unstarted or planned positions. Your quarterly recommendations should evolve, not just repeat the same instruction.
 
-Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, and percentage deltas. Don't hedge excessively.`;
+Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, and percentage deltas.`;
 
       let text = "";
 
@@ -161,8 +250,11 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
     }
   }
 
+  // ── Render ───────────────────────────────────────────────────────────────────
+
   return (
     <div className="flex flex-col gap-6">
+
       {/* ── Inputs ── */}
       <Card>
         <CardHeader>
@@ -171,7 +263,7 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
         <CardContent>
           <div className="grid grid-cols-2 gap-4">
             <Input
-              label="Cash to invest ($)"
+              label={cashAccountsTotal > 0 ? `Cash to invest ($) — synced from Cash Account` : "Cash to invest ($)"}
               type="number"
               min="0"
               step="0.01"
@@ -229,19 +321,32 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
                 const isUnderweight = r.delta > 1;
                 const isOverweight = r.delta < -1;
                 return (
-                  <tr key={r.id}>
+                  <tr key={r.id} className="group">
                     <td className="px-4 py-2.5">
-                      <p className="font-medium">
-                        {r.name}
-                        {isUnstarted && (
-                          <span className="ml-2 inline-flex items-center rounded-full bg-[var(--color-warning)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-warning)]">
-                            Unstarted
-                          </span>
+                      <div className="flex items-center gap-2">
+                        <div className="min-w-0">
+                          <p className="font-medium">
+                            {r.name}
+                            {isUnstarted && (
+                              <span className="ml-2 inline-flex items-center rounded-full bg-[var(--color-warning)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-warning)]">
+                                {r.isPlanned ? "Planned" : "Unstarted"}
+                              </span>
+                            )}
+                          </p>
+                          {r.ticker && (
+                            <p className="font-mono text-xs text-[var(--color-text-muted)]">{r.ticker}</p>
+                          )}
+                        </div>
+                        {r.isPlanned && (
+                          <button
+                            onClick={() => handleDeletePlanned(r.id)}
+                            className="ml-auto shrink-0 rounded p-1 text-[var(--color-text-subtle)] opacity-0 group-hover:opacity-100 hover:text-[var(--color-danger)] transition-opacity"
+                            title="Remove planned holding"
+                          >
+                            <Trash2 size={12} />
+                          </button>
                         )}
-                      </p>
-                      {r.ticker && (
-                        <p className="font-mono text-xs text-[var(--color-text-muted)]">{r.ticker}</p>
-                      )}
+                      </div>
                     </td>
                     <td className="py-2.5 text-right tabular-nums">
                       {formatCurrency(r.current_value, true)}
@@ -283,10 +388,7 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
             </tbody>
             <tfoot>
               <tr className="border-t border-[var(--color-border)] bg-[var(--color-surface-raised)]">
-                <td
-                  colSpan={5}
-                  className="px-4 py-2 text-xs font-medium text-[var(--color-text-muted)]"
-                >
+                <td colSpan={5} className="px-4 py-2 text-xs font-medium text-[var(--color-text-muted)]">
                   Total buys
                 </td>
                 <td className="py-2 pr-4 text-right tabular-nums font-semibold text-[var(--color-success)]">
@@ -295,6 +397,69 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
               </tr>
             </tfoot>
           </table>
+
+          {/* Add planned holding */}
+          <div className="border-t border-[var(--color-border-subtle)] px-4 py-3">
+            {!showAddForm ? (
+              <button
+                onClick={() => setShowAddForm(true)}
+                className="flex items-center gap-1.5 text-xs text-[var(--color-primary)] hover:underline"
+              >
+                <Plus size={12} /> Add planned holding
+              </button>
+            ) : (
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="flex-1 min-w-32">
+                  <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Name</label>
+                  <input
+                    type="text"
+                    value={newName}
+                    onChange={(e) => { setNewName(e.target.value); setNameError(""); }}
+                    placeholder="e.g. Nvidia"
+                    className={`w-full rounded border px-2 py-1 text-sm focus:outline-none focus:border-[var(--color-primary)] ${
+                      nameError ? "border-[var(--color-danger)]" : "border-[var(--color-border)]"
+                    } bg-[var(--color-surface-raised)]`}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleAddPlanned(); }}
+                    autoFocus
+                  />
+                  {nameError && <p className="mt-0.5 text-xs text-[var(--color-danger)]">{nameError}</p>}
+                </div>
+                <div className="w-24">
+                  <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Ticker</label>
+                  <input
+                    type="text"
+                    value={newTicker}
+                    onChange={(e) => setNewTicker(e.target.value.toUpperCase())}
+                    placeholder="NVDA"
+                    className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2 py-1 font-mono text-sm focus:border-[var(--color-primary)] focus:outline-none"
+                    onKeyDown={(e) => { if (e.key === "Enter") handleAddPlanned(); }}
+                  />
+                </div>
+                <div className="w-36">
+                  <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Asset class</label>
+                  <select
+                    value={newAssetClass}
+                    onChange={(e) => setNewAssetClass(e.target.value)}
+                    className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2 py-1 text-sm focus:border-[var(--color-primary)] focus:outline-none"
+                  >
+                    {ASSET_CLASSES.map((a) => (
+                      <option key={a.value} value={a.value}>{a.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex gap-1.5">
+                  <Button size="sm" onClick={handleAddPlanned}>Add</Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => { setShowAddForm(false); setNewName(""); setNewTicker(""); setNameError(""); }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
 
@@ -305,10 +470,7 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
             <p className="mb-1 font-medium text-[var(--color-warning)]">API key required</p>
             <p className="text-[var(--color-text-muted)]">
               Add your Anthropic API key in{" "}
-              <Link
-                to="/settings"
-                className="text-[var(--color-primary)] underline underline-offset-2"
-              >
+              <Link to="/settings" className="text-[var(--color-primary)] underline underline-offset-2">
                 Settings
               </Link>{" "}
               to enable portfolio analysis.
@@ -319,7 +481,7 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
             <Button
               size="sm"
               onClick={handleAnalyze}
-              disabled={analyzing || !allocationOk || holdings.length === 0}
+              disabled={analyzing || !allocationOk || allRows.length === 0}
             >
               <Bot size={14} />
               {analyzing ? "Analyzing…" : "Analyze with Claude"}
