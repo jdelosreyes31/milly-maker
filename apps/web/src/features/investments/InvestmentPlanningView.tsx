@@ -274,7 +274,7 @@ Be specific. Name the theses. Reference actual positions. If you see a portfolio
       let text = "";
       const stream = await client.messages.stream({
         model: "claude-opus-4-6",
-        max_tokens: 2048,
+        max_tokens: 8192,
         system: systemPrompt,
         messages: [{ role: "user", content: userMessage }],
       });
@@ -370,7 +370,7 @@ Be direct, opinionated, specific. Reference tickers, dollar amounts, and percent
       let text = "";
       const stream = await client.messages.stream({
         model: "claude-opus-4-6",
-        max_tokens: 2048,
+        max_tokens: 8192,
         system: systemPrompt,
         messages: [{ role: "user", content: userMessage }],
       });
