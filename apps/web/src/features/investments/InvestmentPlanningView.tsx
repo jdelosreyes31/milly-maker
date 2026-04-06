@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Bot, AlertTriangle, Plus, Trash2 } from "lucide-react";
+import { Bot, AlertTriangle, Plus, Trash2, TrendingUp, Wallet } from "lucide-react";
 import Anthropic from "@anthropic-ai/sdk";
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, formatCurrency } from "@milly-maker/ui";
 import { Link } from "@tanstack/react-router";
@@ -47,6 +47,53 @@ type PlanRow =
   | (InvestmentHolding & { isPlanned: false })
   | (PlannedHolding & { current_value: 0; isPlanned: true });
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function StreamingCard({
+  icon, title, content, streaming, error, endRef,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  content: string;
+  streaming: boolean;
+  error: string | null;
+  endRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {error && (
+        <div className="rounded-[var(--radius-sm)] bg-[var(--color-danger)]/10 px-4 py-3 text-sm text-[var(--color-danger)]">
+          {error}
+        </div>
+      )}
+      {(content || streaming) && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              {icon}
+              <CardTitle>{title}</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {content ? (
+              <p className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--color-text)]">
+                {content}
+              </p>
+            ) : (
+              <span className="inline-flex gap-1 text-[var(--color-text-muted)]">
+                <span className="animate-bounce">·</span>
+                <span className="animate-bounce [animation-delay:0.1s]">·</span>
+                <span className="animate-bounce [animation-delay:0.2s]">·</span>
+              </span>
+            )}
+            <div ref={endRef} />
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 // ── Props ─────────────────────────────────────────────────────────────────────
 
 interface Props {
@@ -76,11 +123,17 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
   const [newAssetClass, setNewAssetClass] = useState("stocks");
   const [nameError, setNameError] = useState("");
 
-  // Analysis state
-  const [analysis, setAnalysis] = useState("");
-  const [analyzing, setAnalyzing] = useState(false);
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
-  const analysisEndRef = useRef<HTMLDivElement>(null);
+  // "Analyze with Claude" — portfolio thesis
+  const [thesis, setThesis] = useState("");
+  const [analyzingThesis, setAnalyzingThesis] = useState(false);
+  const [thesisError, setThesisError] = useState<string | null>(null);
+  const thesisEndRef = useRef<HTMLDivElement>(null);
+
+  // "Invest with Claude" — deployment plan
+  const [investPlan, setInvestPlan] = useState("");
+  const [analyzingPlan, setAnalyzingPlan] = useState(false);
+  const [investPlanError, setInvestPlanError] = useState<string | null>(null);
+  const investPlanEndRef = useRef<HTMLDivElement>(null);
 
   // Persist plan inputs
   useEffect(() => {
@@ -93,10 +146,12 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
   }, [plannedHoldings]);
 
   useEffect(() => {
-    if (analysis) {
-      analysisEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    }
-  }, [analysis]);
+    if (thesis) thesisEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [thesis]);
+
+  useEffect(() => {
+    if (investPlan) investPlanEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [investPlan]);
 
   // ── Unified row list ────────────────────────────────────────────────────────
 
@@ -131,6 +186,26 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
 
   const hasApiKey = !!localStorage.getItem("anthropicApiKey");
 
+  // ── Shared prompt utilities ─────────────────────────────────────────────────
+
+  function buildClient() {
+    const apiKey = localStorage.getItem("anthropicApiKey")!;
+    return new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
+  }
+
+  function buildHoldingsTable() {
+    return allRows
+      .map((r) => {
+        const targetPct = parseFloat(allocations[r.id] ?? "") || 0;
+        const currentPct = totalValue > 0 ? (r.current_value / totalValue) * 100 : 0;
+        const planned = r.isPlanned ? " [PLANNED]" : "";
+        const ticker = r.ticker ? ` (${r.ticker})` : "";
+        const assetLabel = ASSET_CLASSES.find((a) => a.value === r.asset_class)?.label ?? r.asset_class;
+        return `| ${r.name}${ticker} | ${assetLabel} | $${r.current_value.toFixed(2)} | ${currentPct.toFixed(1)}% | ${targetPct.toFixed(1)}%${planned} |`;
+      })
+      .join("\n");
+  }
+
   // ── Handlers ────────────────────────────────────────────────────────────────
 
   function setAllocation(id: string, value: string) {
@@ -162,74 +237,41 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
     });
   }
 
-  async function handleAnalyze() {
+  // ── "Analyze with Claude" — portfolio thesis ────────────────────────────────
+
+  async function handlePortfolioThesis() {
     const apiKey = localStorage.getItem("anthropicApiKey");
     if (!apiKey) return;
-    setAnalyzing(true);
-    setAnalysis("");
-    setAnalysisError(null);
+    setAnalyzingThesis(true);
+    setThesis("");
+    setThesisError(null);
 
     try {
-      const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
+      const client = buildClient();
 
-      const holdingRows = rowsWithBuy
-        .map((r) => {
-          const status =
-            r.delta > 1 ? "UNDERWEIGHT" :
-            r.delta < -1 ? "OVERWEIGHT" :
-            "AT-WEIGHT";
-          const unstarted = r.current_value === 0 && r.targetPct > 0 ? " [UNSTARTED]" : "";
-          const planned = r.isPlanned ? " [PLANNED]" : "";
-          const ticker = r.ticker ? ` (${r.ticker})` : "";
-          const assetLabel = ASSET_CLASSES.find((a) => a.value === r.asset_class)?.label ?? r.asset_class;
-          return `| ${r.name}${ticker} | ${assetLabel} | $${r.current_value.toFixed(2)} | ${r.currentPct.toFixed(1)}% | ${r.targetPct.toFixed(1)}% | ${r.delta > 0 ? "+" : ""}${r.delta.toFixed(1)}% | $${r.buy.toFixed(2)} | ${status}${unstarted}${planned} |`;
-        })
-        .join("\n");
-
-      const unstartedPositions = rowsWithBuy.filter((r) => r.current_value === 0 && r.targetPct > 0);
-      const underweightPositions = rowsWithBuy.filter((r) => r.delta > 1 && r.current_value > 0);
-      const overweightPositions = rowsWithBuy.filter((r) => r.delta < -1);
-
-      const ladderSection =
-        monthlyNum > 0
-          ? `\n\n**Contribution Ladder — $${monthlyNum.toFixed(2)}/month ($${(monthlyNum * 3).toFixed(2)} per quarter)**\n\nWalk me through 4 quarters (months 1–3, 4–6, 7–9, 10–12). For each quarter, reason about where you would deploy the $${(monthlyNum * 3).toFixed(2)} given how the portfolio has drifted since the initial deploy, which positions still need building, and when to initiate any unstarted or planned positions. Don't just repeat the same allocation each quarter — think about what actually changes your recommendation quarter to quarter, and why.`
-          : "";
-
-      const formatList = (items: typeof rowsWithBuy) =>
-        items.length > 0
-          ? items.map((r) => `${r.name}${r.ticker ? ` (${r.ticker})` : ""} (${r.delta > 0 ? "+" : ""}${r.delta.toFixed(1)}%)`).join(", ")
-          : "None";
+      const holdingsTable = buildHoldingsTable();
 
       const userMessage =
-        `I have $${cashNum.toFixed(2)} to invest today and will contribute $${monthlyNum.toFixed(2)}/month going forward. My total current portfolio value is $${totalValue.toFixed(2)}, and after this deploy it would be $${newTotal.toFixed(2)}.
+        `Here is my current portfolio along with my target allocation. Rows marked [PLANNED] are positions I intend to build but don't yet own.
 
-Here is my investment plan. Note: rows marked [PLANNED] are positions I intend to build but do not yet own. Rows marked [UNSTARTED] have a target allocation but zero current value.
+**Portfolio value:** $${totalValue.toFixed(2)}
 
-| Holding | Asset Class | Current Value | Current % | Target % | Delta | Planned Buy | Status |
-|---------|-------------|---------------|-----------|----------|-------|-------------|--------|
-${holdingRows}
+| Holding | Asset Class | Current Value | Current % | Target % |
+|---------|-------------|---------------|-----------|----------|
+${holdingsTable}
 
-**Totals:** Current portfolio $${totalValue.toFixed(2)} | Cash to deploy $${cashNum.toFixed(2)} | Total planned buys $${totalBuy.toFixed(2)}
-
-**Underweight existing positions:** ${formatList(underweightPositions)}
-**Overweight positions:** ${formatList(overweightPositions)}
-**Unstarted / planned positions (no current exposure):** ${unstartedPositions.length > 0 ? unstartedPositions.map((r) => `${r.name}${r.ticker ? ` (${r.ticker})` : ""}${r.isPlanned ? " [planned]" : ""} — target ${r.targetPct}%`).join(", ") : "None"}
-
-Please review this as my portfolio manager. Reason through the plan — not just the arithmetic. For overweight positions, evaluate whether staying overweight is a defensible strategic choice. For unstarted and planned positions, tell me at what portfolio size or cash deployment level it would make practical sense to initiate each one — consider minimum meaningful lot sizes and how they fit the overall build.${ladderSection}`;
+Read this portfolio as a macro strategist would. What economic thesis or theses does this allocation represent? What bets am I making against the broader economy, interest rates, sector rotation, or market structure? Are those bets coherent with each other, or do any positions work against each other? What am I implicitly betting on that I might not realize? What's missing given the thesis — are there obvious hedges, diversifiers, or complementary positions I haven't included? Call out any concentration risks or uncompensated exposures.`;
 
       const systemPrompt =
-        `You are a seasoned portfolio manager conducting a full investment plan review. You have the user's complete current holdings, their intended future positions, their target allocation, and the cash they intend to deploy. Your job is to reason through this plan the way a CFA would — not just validate the arithmetic.
+        `You are a macro strategist and portfolio analyst. The investor is 33 years old targeting moderate-to-aggressive growth over a 7-year horizon to age 40. They have a small floor income provider — enough to cover basic living expenses — which means they can tolerate meaningful volatility and drawdowns but cannot afford a complete wipeout of liquid investment assets.
 
-Consider whether each position is underweight or overweight relative to target, whether the planned buys meaningfully close the gap, and whether going overweight on a specific name or asset class could be a valid strategic choice. A conviction overweight is not automatically wrong — evaluate it on its merits. Flag fractional-share situations as a practical note, not a veto.
+Your job is not to review mechanics or diversification for its own sake. Read this portfolio the way a global macro fund manager would: identify the underlying economic bets, whether the positions are internally consistent, and whether the overall thesis makes sense for someone with this profile and timeline.
 
-For positions the user hasn't yet initiated (marked [UNSTARTED] or [PLANNED]), reason about entry timing: at what portfolio size, cash level, or quarter does it make sense to start building that position? Consider lot sizes, target weight, and how the position fits the overall build strategy.
+Be specific. Name the theses. Reference actual positions. If you see a portfolio that's implicitly betting on AI infrastructure dominance, say so and name which holdings represent that bet. If there's a contradictory position hedging against what the rest of the portfolio is saying, call it out. If the portfolio is missing something obvious given its stated thesis, name it.
 
-If monthly contributions are provided, produce a 3-month-interval ladder for 4 quarters. For each quarter, reason about portfolio drift since the initial deploy — what's still underweight, what's shifted, and when to pull the trigger on unstarted or planned positions. Your quarterly recommendations should evolve, not just repeat the same instruction.
-
-Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, and percentage deltas.`;
+[PLANNED] positions are future intentions — include them in your thesis read but note they're not yet owned.`;
 
       let text = "";
-
       const stream = await client.messages.stream({
         model: "claude-opus-4-6",
         max_tokens: 2048,
@@ -240,13 +282,109 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
       for await (const chunk of stream) {
         if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
           text += chunk.delta.text;
-          setAnalysis(text);
+          setThesis(text);
         }
       }
     } catch (err) {
-      setAnalysisError(err instanceof Error ? err.message : String(err));
+      setThesisError(err instanceof Error ? err.message : String(err));
     } finally {
-      setAnalyzing(false);
+      setAnalyzingThesis(false);
+    }
+  }
+
+  // ── "Invest with Claude" — deployment plan ──────────────────────────────────
+
+  async function handleInvestPlan() {
+    const apiKey = localStorage.getItem("anthropicApiKey");
+    if (!apiKey) return;
+    setAnalyzingPlan(true);
+    setInvestPlan("");
+    setInvestPlanError(null);
+
+    try {
+      const client = buildClient();
+
+      const holdingRows = rowsWithBuy
+        .map((r) => {
+          const status =
+            r.delta > 1 ? "UNDERWEIGHT" :
+            r.delta < -1 ? "OVERWEIGHT" :
+            "AT-WEIGHT";
+          const unstarted = r.current_value === 0 && r.targetPct > 0 ? " [UNSTARTED]" : "";
+          const planned = r.isPlanned ? " [PLANNED]" : "";
+          const doNotBuy =
+            r.buy > 0 && (r.buy < 50 || (newTotal > 0 && r.buy / newTotal < 0.005))
+              ? " [DO NOT BUY — size too small]"
+              : "";
+          const ticker = r.ticker ? ` (${r.ticker})` : "";
+          const assetLabel = ASSET_CLASSES.find((a) => a.value === r.asset_class)?.label ?? r.asset_class;
+          return `| ${r.name}${ticker} | ${assetLabel} | $${r.current_value.toFixed(2)} | ${r.currentPct.toFixed(1)}% | ${r.targetPct.toFixed(1)}% | ${r.delta > 0 ? "+" : ""}${r.delta.toFixed(1)}% | $${r.buy.toFixed(2)} | ${status}${unstarted}${planned}${doNotBuy} |`;
+        })
+        .join("\n");
+
+      const unstartedPositions = rowsWithBuy.filter((r) => r.current_value === 0 && r.targetPct > 0);
+      const underweightPositions = rowsWithBuy.filter((r) => r.delta > 1 && r.current_value > 0);
+      const overweightPositions = rowsWithBuy.filter((r) => r.delta < -1);
+      const doNotBuyPositions = rowsWithBuy.filter(
+        (r) => r.buy > 0 && (r.buy < 50 || (newTotal > 0 && r.buy / newTotal < 0.005))
+      );
+
+      const ladderSection =
+        monthlyNum > 0
+          ? `\n\n**Contribution Ladder — $${monthlyNum.toFixed(2)}/month ($${(monthlyNum * 3).toFixed(2)} per quarter)**\n\nWalk me through 4 quarters (months 1–3, 4–6, 7–9, 10–12). For each quarter, reason about where to deploy the $${(monthlyNum * 3).toFixed(2)} given portfolio drift since the initial deploy, which positions still need building, and when to initiate unstarted or planned positions. Evolve your recommendation quarter to quarter — don't repeat the same instruction.`
+          : "";
+
+      const formatList = (items: typeof rowsWithBuy) =>
+        items.length > 0
+          ? items.map((r) => `${r.name}${r.ticker ? ` (${r.ticker})` : ""} (${r.delta > 0 ? "+" : ""}${r.delta.toFixed(1)}%)`).join(", ")
+          : "None";
+
+      const userMessage =
+        `I have $${cashNum.toFixed(2)} to invest today and will contribute $${monthlyNum.toFixed(2)}/month going forward. My total current portfolio value is $${totalValue.toFixed(2)}, and after this deploy it would be $${newTotal.toFixed(2)}.
+
+Rows marked [PLANNED] are future positions I intend to build. Rows marked [DO NOT BUY — size too small] have a computed buy that is either under $50 or under 0.5% of the post-deploy total — address each one explicitly.
+
+| Holding | Asset Class | Current Value | Current % | Target % | Delta | Planned Buy | Status |
+|---------|-------------|---------------|-----------|----------|-------|-------------|--------|
+${holdingRows}
+
+**Totals:** Portfolio $${totalValue.toFixed(2)} | Cash to deploy $${cashNum.toFixed(2)} | Total planned buys $${totalBuy.toFixed(2)}
+**Underweight:** ${formatList(underweightPositions)}
+**Overweight:** ${formatList(overweightPositions)}
+**Unstarted / planned:** ${unstartedPositions.length > 0 ? unstartedPositions.map((r) => `${r.name}${r.ticker ? ` (${r.ticker})` : ""}${r.isPlanned ? " [planned]" : ""} — target ${r.targetPct}%`).join(", ") : "None"}
+**Do Not Buy (size too small):** ${doNotBuyPositions.length > 0 ? doNotBuyPositions.map((r) => `${r.name} ($${r.buy.toFixed(2)})`).join(", ") : "None"}
+
+Review this as my portfolio manager. Evaluate overweight positions as possible strategic choices, not automatic problems. For unstarted and planned positions, tell me at what portfolio size or cash level it makes sense to initiate them. For DO NOT BUY positions, tell me whether to defer, consolidate, or remove them from the plan.${ladderSection}`;
+
+      const systemPrompt =
+        `You are a seasoned portfolio manager reviewing an investment deployment plan. You have the user's current holdings, planned future positions, target allocations, and the cash they intend to deploy today. Reason through this the way a CFA would — not just arithmetic.
+
+Evaluate whether planned buys meaningfully close allocation gaps. A conviction overweight is not automatically wrong — assess it strategically. For positions the user hasn't yet started (UNSTARTED or PLANNED), reason about entry timing: portfolio size, cash level, and fit with the overall build strategy.
+
+Positions flagged [DO NOT BUY — size too small] must be addressed explicitly: for each, recommend whether to defer until the portfolio is larger, consolidate into a related position, or remove from the plan entirely.
+
+If monthly contributions are provided, produce a 3-month-interval ladder for 4 quarters. Each quarter's recommendation should evolve — reason about drift, priority shifts, and when to pull the trigger on new positions.
+
+Be direct, opinionated, specific. Reference tickers, dollar amounts, and percentage deltas.`;
+
+      let text = "";
+      const stream = await client.messages.stream({
+        model: "claude-opus-4-6",
+        max_tokens: 2048,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userMessage }],
+      });
+
+      for await (const chunk of stream) {
+        if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
+          text += chunk.delta.text;
+          setInvestPlan(text);
+        }
+      }
+    } catch (err) {
+      setInvestPlanError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAnalyzingPlan(false);
     }
   }
 
@@ -263,7 +401,7 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
         <CardContent>
           <div className="grid grid-cols-2 gap-4">
             <Input
-              label={cashAccountsTotal > 0 ? `Cash to invest ($) — synced from Cash Account` : "Cash to invest ($)"}
+              label={cashAccountsTotal > 0 ? "Cash to invest ($) — synced from Cash Account" : "Cash to invest ($)"}
               type="number"
               min="0"
               step="0.01"
@@ -320,6 +458,8 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
                 const isUnstarted = r.current_value === 0 && r.targetPct > 0;
                 const isUnderweight = r.delta > 1;
                 const isOverweight = r.delta < -1;
+                const isTooSmall =
+                  r.buy > 0 && (r.buy < 50 || (newTotal > 0 && r.buy / newTotal < 0.005));
                 return (
                   <tr key={r.id} className="group">
                     <td className="px-4 py-2.5">
@@ -330,6 +470,11 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
                             {isUnstarted && (
                               <span className="ml-2 inline-flex items-center rounded-full bg-[var(--color-warning)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-warning)]">
                                 {r.isPlanned ? "Planned" : "Unstarted"}
+                              </span>
+                            )}
+                            {isTooSmall && (
+                              <span className="ml-2 inline-flex items-center rounded-full bg-[var(--color-danger)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)]">
+                                too small
                               </span>
                             )}
                           </p>
@@ -379,7 +524,7 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
                         ? `${r.delta > 0 ? "+" : ""}${r.delta.toFixed(1)}%`
                         : "—"}
                     </td>
-                    <td className="py-2.5 pr-4 text-right tabular-nums font-medium text-[var(--color-success)]">
+                    <td className={`py-2.5 pr-4 text-right tabular-nums font-medium ${isTooSmall ? "text-[var(--color-danger)]" : "text-[var(--color-success)]"}`}>
                       {r.buy >= 1 ? formatCurrency(r.buy) : "$0.00"}
                     </td>
                   </tr>
@@ -463,68 +608,64 @@ Be direct, opinionated, and specific. Reference actual tickers, dollar amounts, 
         </CardContent>
       </Card>
 
-      {/* ── Analyze ── */}
-      <div className="flex flex-col gap-4">
-        {!hasApiKey ? (
-          <div className="rounded-[var(--radius-sm)] bg-[var(--color-warning)]/10 p-4 text-sm">
-            <p className="mb-1 font-medium text-[var(--color-warning)]">API key required</p>
-            <p className="text-[var(--color-text-muted)]">
-              Add your Anthropic API key in{" "}
-              <Link to="/settings" className="text-[var(--color-primary)] underline underline-offset-2">
-                Settings
-              </Link>{" "}
-              to enable portfolio analysis.
-            </p>
-          </div>
-        ) : (
-          <div className="flex items-center gap-3">
+      {/* ── Actions + output cards ── */}
+      {!hasApiKey ? (
+        <div className="rounded-[var(--radius-sm)] bg-[var(--color-warning)]/10 p-4 text-sm">
+          <p className="mb-1 font-medium text-[var(--color-warning)]">API key required</p>
+          <p className="text-[var(--color-text-muted)]">
+            Add your Anthropic API key in{" "}
+            <Link to="/settings" className="text-[var(--color-primary)] underline underline-offset-2">
+              Settings
+            </Link>{" "}
+            to enable analysis.
+          </p>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
-              onClick={handleAnalyze}
-              disabled={analyzing || !allocationOk || allRows.length === 0}
+              variant="outline"
+              onClick={handlePortfolioThesis}
+              disabled={analyzingThesis || allRows.length === 0}
             >
-              <Bot size={14} />
-              {analyzing ? "Analyzing…" : "Analyze with Claude"}
+              <TrendingUp size={14} />
+              {analyzingThesis ? "Analyzing…" : "Analyze with Claude"}
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleInvestPlan}
+              disabled={analyzingPlan || !allocationOk || allRows.length === 0}
+            >
+              <Wallet size={14} />
+              {analyzingPlan ? "Planning…" : "Invest with Claude"}
             </Button>
             {!allocationOk && allocationSum > 0 && (
               <span className="text-xs text-[var(--color-text-muted)]">
-                Allocations must sum to 100% before analyzing
+                Allocations must sum to 100% for Invest
               </span>
             )}
           </div>
-        )}
 
-        {analysisError && (
-          <div className="rounded-[var(--radius-sm)] bg-[var(--color-danger)]/10 px-4 py-3 text-sm text-[var(--color-danger)]">
-            {analysisError}
-          </div>
-        )}
+          <StreamingCard
+            icon={<TrendingUp size={14} className="text-[var(--color-primary)]" />}
+            title="Portfolio Thesis"
+            content={thesis}
+            streaming={analyzingThesis}
+            error={thesisError}
+            endRef={thesisEndRef}
+          />
 
-        {(analysis || analyzing) && (
-          <Card>
-            <CardHeader>
-              <div className="flex items-center gap-2">
-                <Bot size={14} className="text-[var(--color-primary)]" />
-                <CardTitle>Portfolio Analysis</CardTitle>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {analysis ? (
-                <p className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--color-text)]">
-                  {analysis}
-                </p>
-              ) : (
-                <span className="inline-flex gap-1 text-[var(--color-text-muted)]">
-                  <span className="animate-bounce">·</span>
-                  <span className="animate-bounce [animation-delay:0.1s]">·</span>
-                  <span className="animate-bounce [animation-delay:0.2s]">·</span>
-                </span>
-              )}
-              <div ref={analysisEndRef} />
-            </CardContent>
-          </Card>
-        )}
-      </div>
+          <StreamingCard
+            icon={<Wallet size={14} className="text-[var(--color-primary)]" />}
+            title="Investment Plan"
+            content={investPlan}
+            streaming={analyzingPlan}
+            error={investPlanError}
+            endRef={investPlanEndRef}
+          />
+        </div>
+      )}
     </div>
   );
 }
