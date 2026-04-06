@@ -17,6 +17,7 @@ import {
   ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell,
 } from "recharts";
 import type { Investment } from "@/db/queries/investments.js";
+import { InvestmentPlanningView } from "./InvestmentPlanningView.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -112,6 +113,7 @@ export function InvestmentsPage() {
   const [saving, setSaving] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showAllContribs, setShowAllContribs] = useState(false);
+  const [view, setView] = useState<"overview" | "planning">("overview");
 
   // ── Projection ───────────────────────────────────────────────────────────
   const [projYears, setProjYears] = useState("30");
@@ -276,6 +278,33 @@ export function InvestmentsPage() {
         </div>
       </div>
 
+      {/* View toggle */}
+      <div className="flex gap-1">
+        <button
+          onClick={() => setView("overview")}
+          className={`rounded-[var(--radius-sm)] px-4 py-1.5 text-sm font-medium transition-colors ${
+            view === "overview"
+              ? "bg-[var(--color-primary)] text-white"
+              : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-raised)]"
+          }`}
+        >
+          Overview
+        </button>
+        <button
+          onClick={() => setView("planning")}
+          disabled={holdings.length === 0}
+          title={holdings.length === 0 ? "Add holdings first" : undefined}
+          className={`rounded-[var(--radius-sm)] px-4 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+            view === "planning"
+              ? "bg-[var(--color-primary)] text-white"
+              : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-raised)]"
+          }`}
+        >
+          Planning
+        </button>
+      </div>
+
+      {view === "overview" && (<>
       {/* Stats */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <StatCard label="Total Value" value={formatCurrency(totalValue, true)} accentColor="var(--color-success)" icon={<TrendingUp size={16} />} />
@@ -589,6 +618,11 @@ export function InvestmentsPage() {
             </ResponsiveContainer>
           </CardContent>
         </Card>
+      )}
+
+      </>)}
+      {view === "planning" && (
+        <InvestmentPlanningView holdings={holdings} totalValue={totalValue} />
       )}
 
       {/* ── Add / Edit Account Dialog ── */}
