@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { Plus, Trash2, Pencil, TrendingUp, ChevronDown, ChevronRight, Landmark } from "lucide-react";
+import { Plus, Trash2, Pencil, TrendingUp, ChevronDown, ChevronRight, Landmark, ShoppingCart, TrendingDown } from "lucide-react";
 import {
   Button, Card, CardContent, CardHeader, CardTitle,
   Dialog, Input, Select, StatCard, Badge, formatCurrency, formatPercent,
@@ -18,6 +18,9 @@ import {
 } from "recharts";
 import type { Investment } from "@/db/queries/investments.js";
 import { InvestmentPlanningView } from "./InvestmentPlanningView.js";
+import { InvestmentForecastView } from "./InvestmentForecastView.js";
+import { InvestmentActualView } from "./InvestmentActualView.js";
+import { InvestmentCoastFireView } from "./InvestmentCoastFireView.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -49,12 +52,28 @@ const EMPTY_ACCOUNT: AccountForm = {
 
 interface HoldingForm {
   id?: string; investment_id: string;
-  name: string; ticker: string; shares: string;
+  name: string; ticker: string; shares: string; price: string;
   current_value: string; cost_basis: string; asset_class: string;
 }
 const emptyHolding = (investmentId: string): HoldingForm => ({
-  investment_id: investmentId, name: "", ticker: "", shares: "",
+  investment_id: investmentId, name: "", ticker: "", shares: "", price: "",
   current_value: "", cost_basis: "0", asset_class: "stocks",
+});
+
+// ── Lot form ──────────────────────────────────────────────────────────────────
+
+interface LotForm {
+  holding_id: string;
+  holding_name: string;
+  investment_id: string;
+  shares: string;
+  price_per_share: string;
+  purchased_at: string;
+  notes: string;
+}
+const emptyLot = (holdingId = "", holdingName = "", investmentId = ""): LotForm => ({
+  holding_id: holdingId, holding_name: holdingName, investment_id: investmentId,
+  shares: "", price_per_share: "", purchased_at: new Date().toISOString().slice(0, 10), notes: "",
 });
 
 // ── Contribution form ─────────────────────────────────────────────────────────
@@ -74,10 +93,11 @@ const emptyContrib = (investmentId = ""): ContribForm => ({
 export function InvestmentsPage() {
   const { conn } = useDb();
   const {
-    investments, holdings, contributions, loading,
+    investments, holdings, soldHoldings, contributions, lots, loading,
     holdingsByAccount, add, edit, remove,
-    addOrEditHolding, removeHolding,
+    addOrEditHolding, removeHolding, sellHolding,
     addContribution, removeContribution,
+    addHoldingLot,
     totalValue, totalMonthlyContribution, totalHoldings,
   } = useInvestments();
 
@@ -110,20 +130,27 @@ export function InvestmentsPage() {
   const [contribForm, setContribForm] = useState<ContribForm>(emptyContrib());
   const [contribErrors, setContribErrors] = useState<Partial<ContribForm>>({});
 
+  const [lotDialog, setLotDialog] = useState(false);
+  const [lotForm, setLotForm] = useState<LotForm>(emptyLot());
+  const [lotErrors, setLotErrors] = useState<Partial<Record<keyof LotForm, string>>>({});
+
   const [saving, setSaving] = useState(false);
+  const [priceEdits, setPriceEdits] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showAllContribs, setShowAllContribs] = useState(false);
-  const [view, setView] = useState<"overview" | "planning">("overview");
+  const [view, setView] = useState<"overview" | "planning" | "forecast" | "actual" | "coast">("overview");
 
   // ── Projection ───────────────────────────────────────────────────────────
   const [projYears, setProjYears] = useState("30");
   const years = Number(projYears) || 30;
 
+  const weightedAnnualReturn = totalValue > 0
+    ? investments.reduce((s, i) => s + i.expected_return * i.current_value, 0) / totalValue
+    : 0.07;
+
   const projectionData = useMemo(() => {
     if (investments.length === 0) return [];
-    const avgReturn = totalValue > 0
-      ? investments.reduce((s, i) => s + i.expected_return * i.current_value, 0) / totalValue
-      : 0.07;
+    const avgReturn = weightedAnnualReturn;
     return projectInvestmentGrowth({
       currentValue: totalValue, monthlyContribution: totalMonthlyContribution,
       annualReturnRate: avgReturn, years, inflationRate: 0.03,
@@ -201,7 +228,7 @@ export function InvestmentsPage() {
   function openEditHolding(h: ReturnType<typeof holdingsByAccount>[number]) {
     setHoldingForm({
       id: h.id, investment_id: h.investment_id, name: h.name,
-      ticker: h.ticker ?? "", shares: h.shares != null ? String(h.shares) : "",
+      ticker: h.ticker ?? "", shares: h.shares != null ? String(h.shares) : "", price: "",
       current_value: String(h.current_value), cost_basis: String(h.cost_basis),
       asset_class: h.asset_class,
     });
@@ -225,9 +252,48 @@ export function InvestmentsPage() {
     setSaving(false); setHoldingDialog(false);
   }
 
+  // ── Lot dialog helpers ───────────────────────────────────────────────────
+  function openAddLot(holdingId: string, holdingName: string, investmentId: string) {
+    setLotForm(emptyLot(holdingId, holdingName, investmentId));
+    setLotErrors({}); setLotDialog(true);
+  }
+  async function handleSaveLot() {
+    const e: Partial<Record<keyof LotForm, string>> = {};
+    if (!lotForm.shares || Number(lotForm.shares) <= 0) e.shares = "Enter shares";
+    if (!lotForm.price_per_share || Number(lotForm.price_per_share) <= 0) e.price_per_share = "Enter price";
+    if (Object.keys(e).length) { setLotErrors(e); return; }
+    setSaving(true);
+    await addHoldingLot({
+      holding_id: lotForm.holding_id,
+      investment_id: lotForm.investment_id,
+      shares: Number(lotForm.shares),
+      price_per_share: Number(lotForm.price_per_share),
+      purchased_at: lotForm.purchased_at,
+      notes: lotForm.notes.trim() || null,
+    });
+    setSaving(false); setLotDialog(false);
+  }
+
+  // ── Inline price edit ────────────────────────────────────────────────────
+  async function handlePriceSave(h: ReturnType<typeof holdingsByAccount>[number], priceStr: string) {
+    if (!h.shares || h.shares <= 0 || !priceStr) return;
+    const price = Number(priceStr);
+    if (isNaN(price) || price <= 0) return;
+    const newCurrentValue = parseFloat((h.shares * price).toFixed(2));
+    if (newCurrentValue === h.current_value) return;
+    await addOrEditHolding({
+      id: h.id, investment_id: h.investment_id,
+      name: h.name, ticker: h.ticker,
+      shares: h.shares, current_value: newCurrentValue,
+      cost_basis: h.cost_basis, asset_class: h.asset_class,
+    });
+    setPriceEdits((prev) => { const next = { ...prev }; delete next[h.id]; return next; });
+  }
+
   // ── Contribution dialog helpers ──────────────────────────────────────────
   function openAddContrib(investmentId = "") {
-    setContribForm(emptyContrib(investmentId));
+    const resolvedId = investmentId || (investments.length === 1 ? (investments[0]?.id ?? "") : "");
+    setContribForm(emptyContrib(resolvedId));
     setContribErrors({}); setContribDialog(true);
   }
   async function handleSaveContrib() {
@@ -302,12 +368,46 @@ export function InvestmentsPage() {
         >
           Planning
         </button>
+        <button
+          onClick={() => setView("forecast")}
+          disabled={holdings.length === 0}
+          title={holdings.length === 0 ? "Add holdings first" : undefined}
+          className={`rounded-[var(--radius-sm)] px-4 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+            view === "forecast"
+              ? "bg-[var(--color-primary)] text-white"
+              : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-raised)]"
+          }`}
+        >
+          Forecast
+        </button>
+        <button
+          onClick={() => setView("actual")}
+          disabled={holdings.length === 0}
+          title={holdings.length === 0 ? "Add holdings first" : undefined}
+          className={`rounded-[var(--radius-sm)] px-4 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+            view === "actual"
+              ? "bg-[var(--color-primary)] text-white"
+              : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-raised)]"
+          }`}
+        >
+          Actual
+        </button>
+        <button
+          onClick={() => setView("coast")}
+          className={`rounded-[var(--radius-sm)] px-4 py-1.5 text-sm font-medium transition-colors ${
+            view === "coast"
+              ? "bg-[var(--color-primary)] text-white"
+              : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-raised)]"
+          }`}
+        >
+          Coast FIRE
+        </button>
       </div>
 
       {view === "overview" && (<>
       {/* Stats */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <StatCard label="Total Value" value={formatCurrency(totalValue, true)} accentColor="var(--color-success)" icon={<TrendingUp size={16} />} />
+        <StatCard label="Total Value" value={formatCurrency(totalValue)} accentColor="var(--color-success)" icon={<TrendingUp size={16} />} />
         <StatCard label="Monthly Contribution" value={formatCurrency(totalMonthlyContribution)} />
         <StatCard label="Total Gain / Loss"
           value={formatCurrency(totalGain, true)}
@@ -396,51 +496,100 @@ export function InvestmentsPage() {
                             <tr className="border-b border-[var(--color-border-subtle)] text-left text-xs text-[var(--color-text-muted)]">
                               <th className="px-4 py-2">Holding</th>
                               <th className="py-2">Class</th>
-                              <th className="py-2 text-right">Shares</th>
+                              <th className="py-2 text-right">Alloc</th>
+                              <th className="py-2 text-right">Shares / Price</th>
                               <th className="py-2 text-right">Value</th>
-                              <th className="py-2 w-14" />
+                              <th className="py-2 text-right">Cost Basis</th>
+                              <th className="py-2 w-20" />
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-[var(--color-border-subtle)]">
-                            {acctHoldings.map((h) => (
-                              <tr key={h.id} className="group">
-                                <td className="px-4 py-2">
-                                  <p className="font-medium">{h.name}</p>
-                                  {h.ticker && <p className="text-xs text-[var(--color-text-muted)] font-mono">{h.ticker}</p>}
-                                </td>
-                                <td className="py-2">
-                                  <span
-                                    className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium text-white"
-                                    style={{ backgroundColor: ASSET_CLASS_COLORS[h.asset_class] ?? "#94a3b8" }}
-                                  >
-                                    {ASSET_CLASSES.find((a) => a.value === h.asset_class)?.label ?? h.asset_class}
-                                  </span>
-                                </td>
-                                <td className="py-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
-                                  {h.shares != null ? h.shares.toLocaleString() : "—"}
-                                </td>
-                                <td className="py-2 text-right tabular-nums font-medium">
-                                  {formatCurrency(h.current_value, true)}
-                                </td>
-                                <td className="py-2 pr-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <div className="flex gap-1 justify-end">
-                                    <button onClick={() => openEditHolding(h)} className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-text)]">
-                                      <Pencil size={12} />
-                                    </button>
-                                    <button onClick={() => removeHolding(h.id, h.investment_id)} className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]">
-                                      <Trash2 size={12} />
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
+                            {acctHoldings.map((h) => {
+                              const alloc = holdingsTotal > 0 ? (h.current_value / holdingsTotal) * 100 : 0;
+                              const gain = h.current_value - h.cost_basis;
+                              return (
+                                <tr key={h.id} className="group">
+                                  <td className="px-4 py-2">
+                                    <p className="font-medium">{h.name}</p>
+                                    {h.ticker && <p className="text-xs text-[var(--color-text-muted)] font-mono">{h.ticker}</p>}
+                                  </td>
+                                  <td className="py-2">
+                                    <span
+                                      className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium text-white"
+                                      style={{ backgroundColor: ASSET_CLASS_COLORS[h.asset_class] ?? "#94a3b8" }}
+                                    >
+                                      {ASSET_CLASSES.find((a) => a.value === h.asset_class)?.label ?? h.asset_class}
+                                    </span>
+                                  </td>
+                                  <td className="py-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
+                                    {alloc.toFixed(1)}%
+                                  </td>
+                                  <td className="py-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
+                                    <p>{h.shares != null ? h.shares.toLocaleString(undefined, { maximumFractionDigits: 6 }) : "—"}</p>
+                                    {h.shares != null && h.shares > 0 && (
+                                      <div className="flex items-center justify-end gap-0.5 mt-0.5">
+                                        <span className="text-[10px] text-[var(--color-text-subtle)]">@ $</span>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          step="0.0001"
+                                          className="w-16 text-right text-[10px] bg-transparent border-b border-transparent hover:border-[var(--color-border)] focus:border-[var(--color-primary)] focus:outline-none tabular-nums text-[var(--color-text-muted)]"
+                                          value={priceEdits[h.id] ?? String(parseFloat((h.current_value / h.shares).toFixed(4)))}
+                                          onChange={(e) => setPriceEdits((prev) => ({ ...prev, [h.id]: e.target.value }))}
+                                          onBlur={(e) => void handlePriceSave(h, e.target.value)}
+                                          onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+                                        />
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-2 text-right tabular-nums font-medium">
+                                    <p>{formatCurrency(h.current_value, true)}</p>
+                                    {h.cost_basis > 0 && (
+                                      <p className={`text-[10px] tabular-nums ${gain >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}`}>
+                                        {gain >= 0 ? "+" : ""}{formatCurrency(gain)}
+                                      </p>
+                                    )}
+                                  </td>
+                                  <td className="py-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
+                                    {h.cost_basis > 0 ? formatCurrency(h.cost_basis) : "—"}
+                                  </td>
+                                  <td className="py-2 pr-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <div className="flex gap-1 justify-end">
+                                      <button
+                                        onClick={() => openAddLot(h.id, h.name, h.investment_id)}
+                                        className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-primary)]"
+                                        title="Log buy"
+                                      >
+                                        <ShoppingCart size={12} />
+                                      </button>
+                                      <button
+                                        onClick={() => void sellHolding(h.id)}
+                                        className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[#f79009]"
+                                        title="Sell — removes from dashboard, keeps account value"
+                                      >
+                                        <TrendingDown size={12} />
+                                      </button>
+                                      <button onClick={() => openEditHolding(h)} className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-text)]">
+                                        <Pencil size={12} />
+                                      </button>
+                                      <button onClick={() => removeHolding(h.id, h.investment_id)} className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]">
+                                        <Trash2 size={12} />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
                           </tbody>
                           {acctHoldings.length > 1 && (
                             <tfoot>
                               <tr className="border-t border-[var(--color-border)]">
-                                <td colSpan={3} className="px-4 py-2 text-xs text-[var(--color-text-muted)]">Total</td>
+                                <td colSpan={4} className="px-4 py-2 text-xs text-[var(--color-text-muted)]">Total</td>
                                 <td className="py-2 text-right tabular-nums text-sm font-semibold text-[var(--color-success)]">
                                   {formatCurrency(holdingsTotal, true)}
+                                </td>
+                                <td className="py-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
+                                  {formatCurrency(acctHoldings.reduce((s, h) => s + h.cost_basis, 0))}
                                 </td>
                                 <td />
                               </tr>
@@ -631,6 +780,34 @@ export function InvestmentsPage() {
         />
       )}
 
+      {view === "forecast" && (
+        <InvestmentForecastView
+          holdings={holdings}
+          investments={investments}
+          totalValue={totalValue}
+          totalMonthlyContribution={totalMonthlyContribution}
+        />
+      )}
+
+      {view === "actual" && (
+        <InvestmentActualView
+          holdings={holdings}
+          soldHoldings={soldHoldings}
+          investments={investments}
+          lots={lots}
+          contributions={contributions}
+          totalValue={totalValue}
+        />
+      )}
+
+      {view === "coast" && (
+        <InvestmentCoastFireView
+          totalValue={totalValue}
+          totalMonthlyContribution={totalMonthlyContribution}
+          weightedAnnualReturn={weightedAnnualReturn}
+        />
+      )}
+
       {/* ── Add / Edit Account Dialog ── */}
       <Dialog open={accountDialog} onClose={() => setAccountDialog(false)} title={editingAccountId ? "Edit Account" : "Add Investment Account"}>
         <div className="flex flex-col gap-4">
@@ -657,20 +834,88 @@ export function InvestmentsPage() {
         <div className="flex flex-col gap-4">
           <div className="grid grid-cols-2 gap-3">
             <Input label="Name" placeholder="e.g. Vanguard Total Stock" value={holdingForm.name} onChange={(e) => setHoldingForm((f) => ({ ...f, name: e.target.value }))} error={holdingErrors.name} />
-            <Input label="Ticker (optional)" placeholder="e.g. VTSAX" value={holdingForm.ticker} onChange={(e) => setHoldingForm((f) => ({ ...f, ticker: e.target.value }))} />
+            <Input label="Ticker (optional)" placeholder="e.g. VTSAX" value={holdingForm.ticker} onChange={(e) => setHoldingForm((f) => ({ ...f, ticker: e.target.value.toUpperCase() }))} />
           </div>
           <Select label="Asset Class" options={ASSET_CLASSES} value={holdingForm.asset_class} onChange={(e) => setHoldingForm((f) => ({ ...f, asset_class: e.target.value }))} />
           <div className="grid grid-cols-2 gap-3">
-            <Input label="Current Value ($)" type="number" min="0" step="0.01" value={holdingForm.current_value} onChange={(e) => setHoldingForm((f) => ({ ...f, current_value: e.target.value }))} error={holdingErrors.current_value} />
-            <Input label="Cost Basis ($)" type="number" min="0" step="0.01" value={holdingForm.cost_basis} onChange={(e) => setHoldingForm((f) => ({ ...f, cost_basis: e.target.value }))} />
+            <Input
+              label="Shares (optional)"
+              type="number" min="0" step="0.000001"
+              value={holdingForm.shares}
+              onChange={(e) => setHoldingForm((f) => ({ ...f, shares: e.target.value }))}
+            />
+            <Input
+              label="Current Value ($)"
+              type="number" min="0" step="0.01"
+              value={holdingForm.current_value}
+              onChange={(e) => setHoldingForm((f) => ({ ...f, current_value: e.target.value }))}
+              error={holdingErrors.current_value}
+            />
           </div>
-          <Input label="Shares (optional)" type="number" min="0" step="0.000001" value={holdingForm.shares} onChange={(e) => setHoldingForm((f) => ({ ...f, shares: e.target.value }))} hint="Approximate is fine" />
+          {!holdingForm.id && (
+            <Input
+              label="Cost Basis ($)"
+              type="number" min="0" step="0.01"
+              value={holdingForm.cost_basis}
+              onChange={(e) => setHoldingForm((f) => ({ ...f, cost_basis: e.target.value }))}
+              hint="Initial purchase cost"
+            />
+          )}
           <p className="text-xs text-[var(--color-text-muted)]">
             Saving this holding will update the account's total value to the sum of all its holdings.
           </p>
           <div className="flex justify-end gap-2 pt-1">
             <Button variant="outline" size="sm" onClick={() => setHoldingDialog(false)}>Cancel</Button>
             <Button size="sm" onClick={handleSaveHolding} disabled={saving}>{saving ? "Saving…" : holdingForm.id ? "Save" : "Add Holding"}</Button>
+          </div>
+        </div>
+      </Dialog>
+
+      {/* ── Log Buy (Lot) Dialog ── */}
+      <Dialog open={lotDialog} onClose={() => setLotDialog(false)} title={`Log Buy — ${lotForm.holding_name}`}>
+        <div className="flex flex-col gap-4">
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Shares"
+              type="number" min="0.000001" step="0.000001"
+              value={lotForm.shares}
+              onChange={(e) => setLotForm((f) => ({ ...f, shares: e.target.value }))}
+              error={lotErrors.shares}
+            />
+            <Input
+              label="Price per Share ($)"
+              type="number" min="0.0001" step="0.0001"
+              value={lotForm.price_per_share}
+              onChange={(e) => setLotForm((f) => ({ ...f, price_per_share: e.target.value }))}
+              error={lotErrors.price_per_share}
+            />
+          </div>
+          {lotForm.shares && lotForm.price_per_share && (
+            <p className="text-sm text-[var(--color-text-muted)]">
+              Total cost:{" "}
+              <span className="font-medium text-[var(--color-text)]">
+                {formatCurrency(Number(lotForm.shares) * Number(lotForm.price_per_share))}
+              </span>
+            </p>
+          )}
+          <Input
+            label="Date"
+            type="date"
+            value={lotForm.purchased_at}
+            onChange={(e) => setLotForm((f) => ({ ...f, purchased_at: e.target.value }))}
+          />
+          <Input
+            label="Notes (optional)"
+            placeholder="e.g. DCA buy, earnings dip"
+            value={lotForm.notes}
+            onChange={(e) => setLotForm((f) => ({ ...f, notes: e.target.value }))}
+          />
+          <p className="text-xs text-[var(--color-text-muted)]">
+            This will add to the holding's share count and cost basis.
+          </p>
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" size="sm" onClick={() => setLotDialog(false)}>Cancel</Button>
+            <Button size="sm" onClick={handleSaveLot} disabled={saving}>{saving ? "Saving…" : "Log Buy"}</Button>
           </div>
         </div>
       </Dialog>
