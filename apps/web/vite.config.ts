@@ -26,6 +26,15 @@ function coopCoepPlugin() {
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), coopCoepPlugin()],
+  server: {
+    proxy: {
+      "/yf-api": {
+        target: "https://query1.finance.yahoo.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/yf-api/, ""),
+      },
+    },
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
