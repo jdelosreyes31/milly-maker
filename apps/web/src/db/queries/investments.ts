@@ -153,6 +153,7 @@ export interface InvestmentHolding {
   current_value: number;
   cost_basis: number;
   asset_class: string;
+  is_sold: boolean;
 }
 
 export const ASSET_CLASSES = [
@@ -165,18 +166,23 @@ export const ASSET_CLASSES = [
   { value: "other",       label: "Other" },
 ];
 
+const HOLDING_COLS = `
+  id, investment_id, name, ticker,
+  shares::DOUBLE        AS shares,
+  current_value::DOUBLE AS current_value,
+  cost_basis::DOUBLE    AS cost_basis,
+  asset_class,
+  COALESCE(is_sold, FALSE) AS is_sold
+`;
+
 export async function getHoldingsForAccount(
   conn: AsyncDuckDBConnection,
   investmentId: string
 ): Promise<InvestmentHolding[]> {
   const result = await conn.query(`
-    SELECT id, investment_id, name, ticker,
-           shares::DOUBLE        AS shares,
-           current_value::DOUBLE AS current_value,
-           cost_basis::DOUBLE    AS cost_basis,
-           asset_class
+    SELECT ${HOLDING_COLS}
     FROM investment_holdings
-    WHERE investment_id = '${investmentId}'
+    WHERE investment_id = '${investmentId}' AND COALESCE(is_sold, FALSE) = FALSE
     ORDER BY current_value DESC
   `);
   return result.toArray() as unknown as InvestmentHolding[];
@@ -186,15 +192,37 @@ export async function getAllHoldings(
   conn: AsyncDuckDBConnection
 ): Promise<InvestmentHolding[]> {
   const result = await conn.query(`
-    SELECT id, investment_id, name, ticker,
-           shares::DOUBLE        AS shares,
-           current_value::DOUBLE AS current_value,
-           cost_basis::DOUBLE    AS cost_basis,
-           asset_class
+    SELECT ${HOLDING_COLS}
     FROM investment_holdings
+    WHERE COALESCE(is_sold, FALSE) = FALSE
     ORDER BY investment_id, current_value DESC
   `);
   return result.toArray() as unknown as InvestmentHolding[];
+}
+
+export async function getAllSoldHoldings(
+  conn: AsyncDuckDBConnection
+): Promise<InvestmentHolding[]> {
+  const result = await conn.query(`
+    SELECT ${HOLDING_COLS}
+    FROM investment_holdings
+    WHERE COALESCE(is_sold, FALSE) = TRUE
+    ORDER BY investment_id, current_value DESC
+  `);
+  return result.toArray() as unknown as InvestmentHolding[];
+}
+
+export async function sellHolding(
+  conn: AsyncDuckDBConnection,
+  id: string
+): Promise<void> {
+  // Mark as sold — does NOT call syncHoldingsTotals so account value is unchanged.
+  // Sold holdings still contribute to the account total (proceeds = buying power).
+  await conn.query(`
+    UPDATE investment_holdings
+    SET is_sold = TRUE, shares = 0, updated_at = now()
+    WHERE id = '${id}'
+  `);
 }
 
 export async function upsertHolding(
@@ -354,6 +382,79 @@ export async function deleteContribution(
   id: string
 ): Promise<void> {
   await conn.query(`DELETE FROM investment_contributions WHERE id = '${id}'`);
+}
+
+// ── Holding Lots ──────────────────────────────────────────────────────────────
+
+export interface HoldingLot {
+  id: string;
+  holding_id: string;
+  shares: number;
+  price_per_share: number;
+  purchased_at: string;
+  notes: string | null;
+}
+
+export async function getLotsForHolding(
+  conn: AsyncDuckDBConnection,
+  holdingId: string
+): Promise<HoldingLot[]> {
+  const result = await conn.query(`
+    SELECT id, holding_id,
+           shares::DOUBLE          AS shares,
+           price_per_share::DOUBLE AS price_per_share,
+           purchased_at::VARCHAR   AS purchased_at,
+           notes
+    FROM holding_lots
+    WHERE holding_id = '${holdingId}'
+    ORDER BY purchased_at DESC, created_at DESC
+  `);
+  return result.toArray() as unknown as HoldingLot[];
+}
+
+export async function getAllLots(
+  conn: AsyncDuckDBConnection
+): Promise<HoldingLot[]> {
+  const result = await conn.query(`
+    SELECT id, holding_id,
+           shares::DOUBLE          AS shares,
+           price_per_share::DOUBLE AS price_per_share,
+           purchased_at::VARCHAR   AS purchased_at,
+           notes
+    FROM holding_lots
+    ORDER BY purchased_at DESC, created_at DESC
+  `);
+  return result.toArray() as unknown as HoldingLot[];
+}
+
+export async function insertHoldingLot(
+  conn: AsyncDuckDBConnection,
+  data: {
+    holding_id: string;
+    investment_id: string;
+    shares: number;
+    price_per_share: number;
+    purchased_at: string;
+    notes: string | null;
+  }
+): Promise<void> {
+  const id = nanoid();
+  const notes = data.notes ? `'${esc(data.notes)}'` : "NULL";
+  await conn.query(`
+    INSERT INTO holding_lots (id, holding_id, shares, price_per_share, purchased_at, notes)
+    VALUES ('${id}', '${data.holding_id}', ${data.shares}, ${data.price_per_share},
+            '${data.purchased_at}', ${notes})
+  `);
+  // Accumulate shares + cost onto the holding
+  const lotCost = data.shares * data.price_per_share;
+  await conn.query(`
+    UPDATE investment_holdings SET
+      shares     = COALESCE(shares, 0) + ${data.shares},
+      cost_basis = COALESCE(cost_basis, 0) + ${lotCost},
+      updated_at = now()
+    WHERE id = '${data.holding_id}'
+  `);
+  await syncHoldingsTotals(conn, data.investment_id);
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

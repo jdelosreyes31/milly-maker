@@ -23,11 +23,18 @@ import {
   getFantasyContests,
   insertFantasyContest,
   settleFantasyContest,
+  updateFantasyContest,
   deleteFantasyContest,
   getBetSessions,
   insertBetSession,
   settleBetSession,
   deleteBetSession,
+  getUnderdogBets,
+  insertUnderdogBet,
+  updateUnderdogBet,
+  deleteUnderdogBet,
+  getUnderdogTargets,
+  upsertUnderdogTarget,
 } from "../queries/fantasy.js";
 import type {
   FantasyAccount,
@@ -42,13 +49,15 @@ import type {
   FantasyFundingLink,
   FantasyContest,
   FantasyBetSession,
+  UnderdogBet,
+  UnderdogMonthlyTarget,
 } from "../queries/fantasy.js";
 
 export type {
   FantasyAccount, FantasyPlatformType, FantasyTxType,
   FutureStatus, SeasonStatus,
   FantasyTransaction, FantasyFuture, FantasySeason, FantasyBalanceSummary,
-  FantasyFundingLink, FantasyContest, FantasyBetSession,
+  FantasyFundingLink, FantasyContest, FantasyBetSession, UnderdogBet, UnderdogMonthlyTarget,
 };
 
 // ── Accounts ──────────────────────────────────────────────────────────────────
@@ -199,6 +208,15 @@ export function useFantasyData(accountId: string) {
     await reload();
   }, [conn, reload]);
 
+  const editContest = useCallback(async (
+    id: string,
+    data: Parameters<typeof updateFantasyContest>[2]
+  ) => {
+    if (!conn) return;
+    await updateFantasyContest(conn, id, data);
+    await reload();
+  }, [conn, reload]);
+
   const removeContest = useCallback(async (id: string) => {
     if (!conn) return;
     await deleteFantasyContest(conn, id);
@@ -254,7 +272,7 @@ export function useFantasyData(accountId: string) {
     addTransaction, removeTransaction,
     addFuture, settleFuture, removeFuture,
     addSeason, settleSeason, removeSeason,
-    addContest, resolveContest, removeContest,
+    addContest, resolveContest, editContest, removeContest,
     addBetSession, settleBetSession: settleBetSessionCb, removeBetSession,
     reload,
   };
@@ -290,4 +308,69 @@ export function useFantasyLinks() {
   }, [conn, reload]);
 
   return { links, loading, addLink, removeLink, reload };
+}
+
+// ── Underdog Bet Log ──────────────────────────────────────────────────────────
+
+export function useUnderdogBets(accountId: string) {
+  const { conn } = useDb();
+  const [bets, setBets] = useState<UnderdogBet[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const reload = useCallback(async () => {
+    if (!conn) return;
+    setLoading(true);
+    const data = await getUnderdogBets(conn, accountId);
+    setBets(data);
+    setLoading(false);
+  }, [conn, accountId]);
+
+  useEffect(() => { void reload(); }, [reload]);
+
+  const addBet = useCallback(async (data: Parameters<typeof insertUnderdogBet>[1]) => {
+    if (!conn) return;
+    await insertUnderdogBet(conn, data);
+    await reload();
+  }, [conn, reload]);
+
+  const editBet = useCallback(async (id: string, data: Parameters<typeof updateUnderdogBet>[2]) => {
+    if (!conn) return;
+    await updateUnderdogBet(conn, id, data);
+    await reload();
+  }, [conn, reload]);
+
+  const removeBet = useCallback(async (id: string) => {
+    if (!conn) return;
+    await deleteUnderdogBet(conn, id);
+    await reload();
+  }, [conn, reload]);
+
+  return { bets, loading, addBet, editBet, removeBet, reload };
+}
+
+// ── Underdog Monthly Targets ──────────────────────────────────────────────────
+
+export function useUnderdogTargets(accountId: string) {
+  const { conn } = useDb();
+  const [targets, setTargets] = useState<UnderdogMonthlyTarget[]>([]);
+
+  const reload = useCallback(async () => {
+    if (!conn) return;
+    const data = await getUnderdogTargets(conn, accountId);
+    setTargets(data);
+  }, [conn, accountId]);
+
+  useEffect(() => { void reload(); }, [reload]);
+
+  const saveTarget = useCallback(async (
+    month: string,
+    field: Parameters<typeof upsertUnderdogTarget>[3],
+    value: number | null
+  ) => {
+    if (!conn) return;
+    await upsertUnderdogTarget(conn, accountId, month, field, value);
+    await reload();
+  }, [conn, accountId, reload]);
+
+  return { targets, saveTarget, reload };
 }

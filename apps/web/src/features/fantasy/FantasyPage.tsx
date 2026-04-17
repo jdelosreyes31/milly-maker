@@ -1,8 +1,8 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   Plus, Trash2, ChevronDown, ChevronRight,
   ArrowDownLeft, ArrowUpRight,
-  Check, X, Minus, Settings2, Trophy, TrendingUp, Link2, ClipboardList, Dices,
+  Check, X, Minus, Settings2, Trophy, TrendingUp, Link2, ClipboardList, Dices, FileDown,
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line,
@@ -13,7 +13,7 @@ import {
   Button, Card, CardContent, CardHeader, CardTitle,
   Dialog, Input, Select, Badge, formatCurrency, cn,
 } from "@milly-maker/ui";
-import { useFantasyAccounts, useFantasyData, useFantasyLinks } from "@/db/hooks/useFantasy.js";
+import { useFantasyAccounts, useFantasyData, useFantasyLinks, useUnderdogBets, useUnderdogTargets } from "@/db/hooks/useFantasy.js";
 import { useCheckingAccounts } from "@/db/hooks/useChecking.js";
 import { useSavingsAccounts } from "@/db/hooks/useSavings.js";
 import { useDb } from "@/db/hooks/useDb.js";
@@ -21,7 +21,7 @@ import { insertTransaction } from "@/db/queries/checking.js";
 import { insertSavingsTransaction } from "@/db/queries/savings.js";
 import type {
   FantasyPlatformType, FantasyTxType,
-  FutureStatus, SeasonStatus, FantasyContest, FantasyBetSession,
+  FutureStatus, SeasonStatus, FantasyContest, FantasyBetSession, UnderdogBet, UnderdogMonthlyTarget,
 } from "@/db/queries/fantasy.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -783,66 +783,121 @@ function ContestDialog({ open, onClose, accounts, defaultAccountId, onSave }: Co
   );
 }
 
-// ── Settle contest dialog ──────────────────────────────────────────────────────
+// ── Contest edit/settle dialog ────────────────────────────────────────────────
 
-interface SettleContestDialogProps {
-  contest: FantasyContest | null;
-  onClose: () => void;
-  onSave: (id: string, data: { finish_position?: number; winnings: number; settled_date: string }) => Promise<void>;
+interface ContestUpdateData {
+  description?: string;
+  entry_fee?: number;
+  contest_size?: number | null;
+  finish_position?: number | null;
+  winnings?: number | null;
+  placed_date?: string;
+  settled_date?: string | null;
+  notes?: string | null;
 }
 
-function SettleContestDialog({ contest, onClose, onSave }: SettleContestDialogProps) {
+interface ContestEditDialogProps {
+  contest: FantasyContest | null;
+  mode: "settle" | "edit";
+  onClose: () => void;
+  onSave: (id: string, data: ContestUpdateData) => Promise<void>;
+}
+
+function ContestEditDialog({ contest, mode, onClose, onSave }: ContestEditDialogProps) {
+  const [description, setDescription] = useState("");
+  const [entryFee, setEntryFee] = useState("");
+  const [contestSize, setContestSize] = useState("");
   const [finish, setFinish] = useState("");
   const [winnings, setWinnings] = useState("");
-  const [settledDate, setSettledDate] = useState(new Date().toISOString().slice(0, 10));
-  const [errors, setErrors] = useState<{ winnings?: string; settled_date?: string }>({});
+  const [placedDate, setPlacedDate] = useState("");
+  const [settledDate, setSettledDate] = useState("");
+  const [notes, setNotes] = useState("");
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
   React.useEffect(() => {
     if (contest) {
+      setDescription(contest.description);
+      setEntryFee(String(contest.entry_fee));
+      setContestSize(contest.contest_size != null ? String(contest.contest_size) : "");
       setFinish(contest.finish_position != null ? String(contest.finish_position) : "");
       setWinnings(contest.winnings != null ? String(contest.winnings) : "");
-      setSettledDate(new Date().toISOString().slice(0, 10));
+      setPlacedDate(contest.placed_date);
+      setSettledDate(contest.settled_date ?? new Date().toISOString().slice(0, 10));
+      setNotes(contest.notes ?? "");
       setErrors({});
     }
   }, [contest]);
 
   async function handleSave() {
-    const e: { winnings?: string; settled_date?: string } = {};
-    if (winnings === "" || isNaN(Number(winnings)) || Number(winnings) < 0)
-      e.winnings = "Enter winnings (0 if you lost)";
-    if (!settledDate) e.settled_date = "Required";
+    const e: Record<string, string> = {};
+    if (mode === "settle") {
+      if (winnings === "" || isNaN(Number(winnings)) || Number(winnings) < 0)
+        e.winnings = "Enter winnings (0 if you lost)";
+      if (!settledDate) e.settledDate = "Required";
+    }
     setErrors(e);
     if (Object.keys(e).length > 0) return;
     setSaving(true);
-    await onSave(contest!.id, {
-      finish_position: finish ? Number(finish) : undefined,
-      winnings: Number(winnings),
-      settled_date: settledDate,
-    });
+    const data: ContestUpdateData = {
+      description: description || undefined,
+      entry_fee: entryFee ? Number(entryFee) : undefined,
+      contest_size: contestSize ? Number(contestSize) : null,
+      finish_position: finish ? Number(finish) : null,
+      winnings: winnings !== "" ? Number(winnings) : mode === "settle" ? 0 : null,
+      placed_date: placedDate || undefined,
+      settled_date: settledDate || null,
+      notes: notes || null,
+    };
+    await onSave(contest!.id, data);
     setSaving(false);
     onClose();
   }
 
+  const isSettle = mode === "settle";
+  const title = isSettle ? `Settle: ${contest?.description ?? ""}` : `Edit: ${contest?.description ?? ""}`;
+
   return (
-    <Dialog open={!!contest} onClose={onClose} title={`Settle: ${contest?.description ?? ""}`}>
+    <Dialog open={!!contest} onClose={onClose} title={title}>
       <div className="flex flex-col gap-4">
-        <div className="rounded-[var(--radius-sm)] bg-[var(--color-surface-raised)] px-3 py-2 text-sm">
-          <span className="text-[var(--color-text-muted)]">Entry fee:</span>{" "}
-          <strong>{formatCurrency(contest?.entry_fee ?? 0)}</strong>
-        </div>
+        {!isSettle && (
+          <>
+            <Input label="Description" value={description} onChange={e => setDescription(e.target.value)} />
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Entry Fee ($)" type="number" step="0.01" min="0" value={entryFee}
+                onChange={e => setEntryFee(e.target.value)} />
+              <Input label="Contest Size (# entrants)" type="number" min="1" value={contestSize}
+                onChange={e => setContestSize(e.target.value)} placeholder="optional" />
+            </div>
+            <Input label="Date Played" type="date" value={placedDate}
+              onChange={e => setPlacedDate(e.target.value)} />
+          </>
+        )}
+        {isSettle && (
+          <div className="rounded-[var(--radius-sm)] bg-[var(--color-surface-raised)] px-3 py-2 text-sm">
+            <span className="text-[var(--color-text-muted)]">Entry fee:</span>{" "}
+            <strong>{formatCurrency(contest?.entry_fee ?? 0)}</strong>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
-          <Input label="Finish Position (optional)" type="number" min="1" placeholder="42"
-            value={finish} onChange={(e) => setFinish(e.target.value)} />
+          <Input label="Finish Position" type="number" min="1" placeholder="42"
+            value={finish} onChange={e => setFinish(e.target.value)} />
           <Input label="Winnings ($)" type="number" step="0.01" min="0" placeholder="0.00"
-            value={winnings} onChange={(e) => setWinnings(e.target.value)}
+            value={winnings} onChange={e => setWinnings(e.target.value)}
             error={errors.winnings} />
         </div>
-        <Input label="Settled Date" type="date" value={settledDate}
-          onChange={(e) => setSettledDate(e.target.value)} error={errors.settled_date} />
+        <Input label={isSettle ? "Settled Date" : "Settled Date (leave blank if still open)"}
+          type="date" value={settledDate}
+          onChange={e => setSettledDate(e.target.value)} error={errors.settledDate} />
+        {!isSettle && (
+          <Input label="Notes" placeholder="Any context" value={notes}
+            onChange={e => setNotes(e.target.value)} />
+        )}
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
-          <Button size="sm" onClick={handleSave} disabled={saving}>{saving ? "Saving…" : "Settle"}</Button>
+          <Button size="sm" onClick={handleSave} disabled={saving}>
+            {saving ? "Saving…" : isSettle ? "Settle" : "Save Changes"}
+          </Button>
         </div>
       </div>
     </Dialog>
@@ -870,7 +925,7 @@ export function FantasyPage() {
     addTransaction, removeTransaction,
     addFuture, settleFuture, removeFuture,
     addSeason, settleSeason, removeSeason,
-    addContest, resolveContest, removeContest,
+    addContest, resolveContest, editContest, removeContest,
     addBetSession, settleBetSession, removeBetSession,
   } = useFantasyData(effectiveId);
 
@@ -887,11 +942,42 @@ export function FantasyPage() {
   const [showSettledSeasons, setShowSettledSeasons] = useState(false);
   const [contestDialogOpen, setContestDialogOpen] = useState(false);
   const [settleContestTarget, setSettleContestTarget] = useState<FantasyContest | null>(null);
+  const [editContestTarget, setEditContestTarget] = useState<FantasyContest | null>(null);
   const [showSettledContests, setShowSettledContests] = useState(false);
   const [betSessionDialogOpen, setBetSessionDialogOpen] = useState(false);
   const [settleBetSessionDialogOpen, setSettleBetSessionDialogOpen] = useState(false);
   const [settlingBetSession, setSettlingBetSession] = useState<FantasyBetSession | null>(null);
   const [winBanners, setWinBanners] = useState<WinBanner[]>([]);
+  const [simTab, setSimTab] = useState<"overview" | "bets" | "simulator">("overview");
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState("");
+  const [resetting, setResetting] = useState(false);
+
+  async function handleResetAccount(accountId: string) {
+    if (!conn) return;
+    setResetting(true);
+    try {
+      // Delete all data associated with this account, FK-safe order
+      await conn.query(`
+        DELETE FROM checking_fantasy_links
+        WHERE fantasy_account_id = '${accountId}'
+           OR fantasy_tx_id IN (
+             SELECT id FROM fantasy_transactions WHERE account_id = '${accountId}'
+           )
+      `);
+      await conn.query(`DELETE FROM underdog_bets WHERE account_id = '${accountId}'`);
+      await conn.query(`DELETE FROM underdog_monthly_targets WHERE account_id = '${accountId}'`);
+      await conn.query(`DELETE FROM fantasy_bet_sessions WHERE account_id = '${accountId}'`);
+      await conn.query(`DELETE FROM fantasy_contests WHERE account_id = '${accountId}'`);
+      await conn.query(`DELETE FROM fantasy_futures WHERE account_id = '${accountId}'`);
+      await conn.query(`DELETE FROM fantasy_transactions WHERE account_id = '${accountId}'`);
+      await conn.query(`DELETE FROM fantasy_seasons WHERE account_id = '${accountId}'`);
+      setResetDialogOpen(false);
+      setResetConfirmText("");
+    } finally {
+      setResetting(false);
+    }
+  }
 
   React.useEffect(() => {
     if (accounts.length === 1 && selectedId === "ALL") setSelectedId(accounts[0]!.id);
@@ -1276,13 +1362,22 @@ export function FantasyPage() {
         {/* Action buttons — context-aware */}
         <div className="flex items-center gap-2">
           {selectedAccount && (
-            <button
-              onClick={() => { setEditingAccount(selectedAccount); setAccountDialogOpen(true); }}
-              className="rounded p-1.5 text-[var(--color-text-subtle)] hover:bg-[var(--color-surface-raised)] hover:text-[var(--color-text-muted)]"
-              title="Edit account"
-            >
-              <Settings2 size={15} />
-            </button>
+            <>
+              <button
+                onClick={() => { setResetConfirmText(""); setResetDialogOpen(true); }}
+                className="rounded p-1.5 text-[var(--color-text-subtle)] hover:bg-red-500/10 hover:text-[var(--color-danger)]"
+                title={`Reset ${selectedAccount.name}`}
+              >
+                <Trash2 size={15} />
+              </button>
+              <button
+                onClick={() => { setEditingAccount(selectedAccount); setAccountDialogOpen(true); }}
+                className="rounded p-1.5 text-[var(--color-text-subtle)] hover:bg-[var(--color-surface-raised)] hover:text-[var(--color-text-muted)]"
+                title="Edit account"
+              >
+                <Settings2 size={15} />
+              </button>
+            </>
           )}
 
           {/* League view: Add Season */}
@@ -1322,6 +1417,31 @@ export function FantasyPage() {
         </div>
       </div>
 
+      {/* Tab bar — single non-league account only */}
+      {!viewIsLeague && !viewIsAll && (
+        <div className="flex gap-1 border-b border-[var(--color-border-subtle)]">
+          {([
+            { key: "overview", label: "Overview" },
+            { key: "bets", label: "Bet Log" },
+            { key: "simulator", label: "Simulator" },
+          ] as const).map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => setSimTab(key)}
+              className={cn(
+                "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
+                simTab === key
+                  ? "border-[var(--color-primary)] text-[var(--color-primary)]"
+                  : "border-transparent text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {(viewIsLeague || viewIsAll || simTab === "overview") && (<>
       {/* Balance / summary cards */}
       {viewIsLeague && selectedAccount ? (
         // ── League account view ──
@@ -1540,8 +1660,8 @@ export function FantasyPage() {
 
       {/* ── Contests (DFS / sportsbook) ───────────────────────────────────── */}
       {!viewIsLeague && contests.length > 0 && (() => {
-        const pending  = contests.filter((c) => c.settled_date == null);
-        const settled  = contests.filter((c) => c.settled_date != null);
+        const pending  = contests.filter((c) => c.winnings == null && c.finish_position == null);
+        const settled  = contests.filter((c) => c.winnings != null || c.finish_position != null);
         const visible  = showSettledContests ? contests : pending.length > 0 ? pending : contests;
         const totalNet = settled.reduce((s, c) => s + (c.winnings ?? 0) - c.entry_fee, 0);
 
@@ -1588,7 +1708,7 @@ export function FantasyPage() {
                 </thead>
                 <tbody className="divide-y divide-[var(--color-border-subtle)]">
                   {visible.map((c) => {
-                    const isSettled = c.settled_date != null;
+                    const isSettled = c.winnings != null || c.finish_position != null;
                     const net = isSettled ? (c.winnings ?? 0) - c.entry_fee : null;
                     return (
                       <tr key={c.id} className="group">
@@ -1624,20 +1744,28 @@ export function FantasyPage() {
                             ? <span className={net >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}>
                                 {net >= 0 ? "+" : ""}{formatCurrency(net)}
                               </span>
-                            : <Badge variant="outline">Pending</Badge>}
+                            : <Badge variant="outline" className="border-amber-500/50 text-amber-500">In Play</Badge>}
                         </td>
                         <td className="py-2.5 pr-3 text-right text-[var(--color-text-muted)]">
                           {c.settled_date ? formatDate(c.settled_date) : <span className="text-[var(--color-text-subtle)]">—</span>}
                         </td>
                         <td className="py-2.5 pl-2">
                           <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                            {!isSettled && (
+                            {!isSettled ? (
                               <button
                                 onClick={() => setSettleContestTarget(c)}
                                 className="rounded px-1.5 py-0.5 text-xs font-medium text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10"
                                 title="Settle contest"
                               >
                                 Settle
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => setEditContestTarget(c)}
+                                className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-text)]"
+                                title="Edit contest"
+                              >
+                                <Settings2 size={13} />
                               </button>
                             )}
                             <button
@@ -2041,6 +2169,17 @@ export function FantasyPage() {
           </CardContent>
         </Card>
       )}
+      </>)}
+
+      {/* ── Bet Log ─────────────────────────────────────────────────────────── */}
+      {simTab === "bets" && !viewIsLeague && !viewIsAll && (
+        <UnderdogBetLog accountId={effectiveId} />
+      )}
+
+      {/* ── Monte Carlo Simulator ────────────────────────────────────────────── */}
+      {simTab === "simulator" && !viewIsLeague && !viewIsAll && (
+        <MonteCarloSimulator bankroll={currentBalance} payout={3.5} />
+      )}
 
       {/* ── Dialogs ─────────────────────────────────────────────────────────── */}
 
@@ -2130,10 +2269,19 @@ export function FantasyPage() {
       />
 
       {/* Settle Contest */}
-      <SettleContestDialog
+      <ContestEditDialog
         contest={settleContestTarget}
+        mode="settle"
         onClose={() => setSettleContestTarget(null)}
-        onSave={resolveContest}
+        onSave={editContest}
+      />
+
+      {/* Edit settled contest */}
+      <ContestEditDialog
+        contest={editContestTarget}
+        mode="edit"
+        onClose={() => setEditContestTarget(null)}
+        onSave={editContest}
       />
 
       {/* Add Season */}
@@ -2161,6 +2309,49 @@ export function FantasyPage() {
         } : undefined}
         title={editingAccount ? "Edit Account" : "New Fantasy Account"}
       />
+
+      {/* ── Reset account confirmation dialog ── */}
+      {selectedAccount && (
+        <Dialog open={resetDialogOpen} onClose={() => setResetDialogOpen(false)} title={`Reset ${selectedAccount.name}`}>
+          <div className="flex flex-col gap-4 p-1">
+            <div className="rounded-lg border border-[var(--color-danger)]/30 bg-[var(--color-danger)]/5 px-4 py-3 text-sm">
+              <p className="font-semibold text-[var(--color-danger)] mb-1">This cannot be undone.</p>
+              <p className="text-[var(--color-text-muted)] text-xs leading-relaxed">
+                All transactions, futures, seasons, contests, bet sessions, underdog bets, and funding links for <span className="font-semibold text-[var(--color-text)]">{selectedAccount.name}</span> will be permanently deleted. The account itself will remain.
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs text-[var(--color-text-muted)] mb-1.5">
+                Type <span className="font-mono font-semibold text-[var(--color-text)]">reset</span> to confirm
+              </label>
+              <input
+                type="text"
+                value={resetConfirmText}
+                onChange={e => setResetConfirmText(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && resetConfirmText === "reset") void handleResetAccount(selectedAccount.id); }}
+                placeholder="reset"
+                autoFocus
+                className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 py-2 text-sm focus:border-[var(--color-danger)] focus:outline-none font-mono"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setResetDialogOpen(false)}
+                className="rounded px-4 py-2 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void handleResetAccount(selectedAccount.id)}
+                disabled={resetConfirmText !== "reset" || resetting}
+                className="rounded bg-[var(--color-danger)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40 hover:opacity-90 transition-opacity"
+              >
+                {resetting ? "Resetting…" : `Reset ${selectedAccount.name}`}
+              </button>
+            </div>
+          </div>
+        </Dialog>
+      )}
     </div>
   );
 }
@@ -2179,4 +2370,1231 @@ function formatDate(dateStr: string): string {
   return new Date(dateStr + "T12:00:00").toLocaleDateString("en-US", {
     month: "short", day: "numeric", year: "numeric",
   });
+}
+
+// ── Underdog Bet Log ──────────────────────────────────────────────────────────
+
+const BET_TYPES = [
+  "2 Man Non-Insured",
+  "6-Man Insured",
+  "3 Man Non Insured",
+  "6-Man Non Insured",
+  "3 Man Insured",
+  "Other",
+];
+
+const LEG_DEFAULTS: Record<string, number> = {
+  "2 Man Non-Insured": 2,
+  "6-Man Insured": 6,
+  "6-Man Non Insured": 6,
+  "3 Man Non Insured": 3,
+  "3 Man Insured": 3,
+};
+
+interface BetFormState {
+  entry_date: string;
+  entry_id: string;
+  bet_type: string;
+  entry_size: string;
+  legs: string;
+  oddsjam_hit: string;
+  oddsjam_ev: string;
+  ev_amount: string;
+  legs_hit: string;
+  legs_pushed: string;
+  settled: string;
+  tax: string;
+  rescued: boolean;
+  promo: string;
+  notes: string;
+}
+
+const EMPTY_BET_FORM: BetFormState = {
+  entry_date: new Date().toISOString().slice(0, 10),
+  entry_id: "",
+  bet_type: "2 Man Non-Insured",
+  entry_size: "",
+  legs: "2",
+  oddsjam_hit: "",
+  oddsjam_ev: "",
+  ev_amount: "",
+  legs_hit: "",
+  legs_pushed: "",
+  settled: "",
+  tax: "",
+  rescued: false,
+  promo: "",
+  notes: "",
+};
+
+function betFormToData(form: BetFormState, accountId: string): Omit<UnderdogBet, "id" | "created_at"> {
+  const pct = (s: string) => s !== "" ? parseFloat(s) / 100 : null;
+  const num = (s: string) => s !== "" ? parseFloat(s) : null;
+  const int = (s: string) => s !== "" ? parseInt(s) : null;
+  return {
+    account_id: accountId,
+    entry_date: form.entry_date,
+    entry_id: form.entry_id || null,
+    oddsjam_hit: pct(form.oddsjam_hit),
+    oddsjam_ev: pct(form.oddsjam_ev),
+    ev_amount: num(form.ev_amount),
+    bet_type: form.bet_type,
+    entry_size: parseFloat(form.entry_size) || 0,
+    legs: parseInt(form.legs) || 6,
+    legs_hit: int(form.legs_hit),
+    legs_pushed: int(form.legs_pushed),
+    settled: num(form.settled),
+    tax: num(form.tax),
+    rescued: form.rescued,
+    promo: form.promo || null,
+    notes: form.notes || null,
+  };
+}
+
+function betToForm(b: UnderdogBet): BetFormState {
+  const pct = (v: number | null) => v != null ? (v * 100).toFixed(2) : "";
+  const num = (v: number | null) => v != null ? String(v) : "";
+  return {
+    entry_date: b.entry_date,
+    entry_id: b.entry_id ?? "",
+    bet_type: b.bet_type,
+    entry_size: String(b.entry_size),
+    legs: String(b.legs),
+    oddsjam_hit: pct(b.oddsjam_hit),
+    oddsjam_ev: pct(b.oddsjam_ev),
+    ev_amount: num(b.ev_amount),
+    legs_hit: b.legs_hit != null ? String(b.legs_hit) : "",
+    legs_pushed: b.legs_pushed != null ? String(b.legs_pushed) : "",
+    settled: b.settled != null ? String(b.settled) : "",
+    tax: b.tax != null ? String(b.tax) : "",
+    rescued: b.rescued,
+    promo: b.promo ?? "",
+    notes: b.notes ?? "",
+  };
+}
+
+
+// ── Monte Carlo Simulator ──────────────────────────────────────────────────────
+
+interface SimBetRow {
+  id: string;
+  numBets: string;
+  evMin: string;
+  evMax: string;
+  manualAmount: string;
+}
+
+interface SimResult {
+  betSummary: { numBets: number; ev: number; amount: number; kelly: number; halfKelly: number }[];
+  totalExpectedProfit: number;
+  totalStake: number;
+  expectedFinal: number;
+  mean: number;
+  p10: number; p25: number; p50: number; p75: number; p90: number; p99: number;
+  ciLo: number; ciHi: number;
+  probLoss: number; cvar5: number; sharpe: number; sortino: number;
+  riskBands: { label: string; pct: number }[];
+  histData: { x: number; count: number }[];
+  difference: number;
+  pctDiff: number;
+}
+
+function kellyFrac(pay: number, ev: number, half: boolean): number {
+  const p = 1 / (pay / (1 + ev));
+  const q = 1 - p;
+  const b = pay - 1;
+  const k = (b * p - q) / b;
+  return half ? k / 2 : k;
+}
+
+function simPercentile(sorted: Float64Array, p: number): number {
+  const idx = Math.floor(p * sorted.length);
+  return sorted[Math.min(idx, sorted.length - 1)] ?? 0;
+}
+
+const N_SIM_TRIALS = 10_000;
+
+function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { bankroll: number; payout: number }) {
+  const [bankroll, setBankroll] = useState(initBankroll > 0 ? String(initBankroll) : "");
+  const [payout, setPayout] = useState(String(initPayout));
+  const [rows, setRows] = useState<SimBetRow[]>([
+    { id: crypto.randomUUID(), numBets: "75", evMin: "6", evMax: "6", manualAmount: "" },
+    { id: crypto.randomUUID(), numBets: "45", evMin: "17", evMax: "17", manualAmount: "" },
+  ]);
+  const [result, setResult] = useState<SimResult | null>(null);
+
+
+  function addRow() {
+    setRows((r) => [...r, { id: crypto.randomUUID(), numBets: "", evMin: "", evMax: "", manualAmount: "" }]);
+  }
+  function removeRow(id: string) {
+    setRows((r) => r.filter((row) => row.id !== id));
+  }
+  function updateRow(id: string, field: keyof SimBetRow, value: string) {
+    setRows((r) => r.map((row) => row.id === id ? { ...row, [field]: value } : row));
+  }
+
+  function runSim() {
+    const br = parseFloat(bankroll);
+    const pay = parseFloat(payout);
+    if (!br || !pay || br <= 0 || pay <= 0) return;
+
+    const betSummary: SimResult["betSummary"] = [];
+    const betGroups: { n: number; ev: number; amt: number }[] = [];
+
+    for (const row of rows) {
+      const n = parseInt(row.numBets);
+      const evMin = parseFloat(row.evMin) / 100;
+      const evMax = parseFloat(row.evMax) / 100;
+      if (!n || isNaN(evMin) || isNaN(evMax)) continue;
+      const ev = (evMin + evMax) / 2;
+      const kf = kellyFrac(pay, ev, true);
+      const amt = row.manualAmount !== "" ? parseFloat(row.manualAmount) : Math.max(0, Math.round(kf * br * 100) / 100);
+      betSummary.push({ numBets: n, ev, amount: amt, kelly: kellyFrac(pay, ev, false), halfKelly: kf });
+      betGroups.push({ n, ev, amt });
+    }
+
+    const totalStake = betGroups.reduce((s, g) => s + g.n * g.amt, 0);
+    const totalExpectedProfit = betGroups.reduce((s, g) => s + g.n * g.amt * g.ev, 0);
+    const expectedFinal = br + totalExpectedProfit;
+
+    // Monte Carlo
+    const finals = new Float64Array(N_SIM_TRIALS);
+    for (let t = 0; t < N_SIM_TRIALS; t++) {
+      let bal = br;
+      for (const g of betGroups) {
+        const ev = g.ev;
+        const p = 1 / (pay / (1 + ev));
+        for (let i = 0; i < g.n; i++) {
+          bal -= g.amt;
+          if (Math.random() < p) bal += g.amt * pay;
+        }
+      }
+      finals[t] = bal;
+    }
+    finals.sort();
+
+    const mean = finals.reduce((s, v) => s + v, 0) / N_SIM_TRIALS;
+    const variance = finals.reduce((s, v) => s + (v - mean) ** 2, 0) / N_SIM_TRIALS;
+    const std = Math.sqrt(variance);
+    const losses = finals.filter((v) => v < br);
+    const tail5pct = finals.slice(0, Math.floor(0.05 * N_SIM_TRIALS));
+    const cvar5 = tail5pct.length > 0 ? tail5pct.reduce((s, v) => s + v, 0) / tail5pct.length : br;
+    const downReturns = Array.from(finals).filter((v) => v < br).map((v) => v - br);
+    const downVar = downReturns.length > 0 ? downReturns.reduce((s, v) => s + v ** 2, 0) / downReturns.length : 0;
+    const sortino = downVar > 0 ? (mean - br) / Math.sqrt(downVar) : 0;
+    const sharpe = std > 0 ? (mean - br) / std : 0;
+
+    const p10 = simPercentile(finals, 0.10);
+    const p25 = simPercentile(finals, 0.25);
+    const p50 = simPercentile(finals, 0.50);
+    const p75 = simPercentile(finals, 0.75);
+    const p90 = simPercentile(finals, 0.90);
+    const p99 = simPercentile(finals, 0.99);
+    const ciLo = simPercentile(finals, 0.025);
+    const ciHi = simPercentile(finals, 0.975);
+    const probLoss = losses.length / N_SIM_TRIALS;
+
+    // histogram
+    const minV = finals[0] ?? 0;
+    const maxV = finals[N_SIM_TRIALS - 1] ?? 0;
+    const nBins = 30;
+    const binW = (maxV - minV) / nBins || 1;
+    const bins = Array.from({ length: nBins }, (_, i) => ({ x: minV + i * binW + binW / 2, count: 0 }));
+    for (const v of finals) {
+      const idx = Math.min(Math.floor((v - minV) / binW), nBins - 1);
+      bins[idx]!.count++;
+    }
+
+    const riskBands = [
+      { label: "Prob Loss", pct: probLoss * 100 },
+      { label: "CVaR 5%", pct: ((br - cvar5) / br) * 100 },
+    ];
+
+    setResult({
+      betSummary, totalExpectedProfit, totalStake, expectedFinal,
+      mean, p10, p25, p50, p75, p90, p99,
+      ciLo, ciHi, probLoss, cvar5, sharpe, sortino,
+      riskBands, histData: bins,
+      difference: mean - br,
+      pctDiff: br > 0 ? (mean - br) / br * 100 : 0,
+    });
+  }
+
+  const fmt = (v: number) => v.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
+  const fmtPct = (v: number) => `${v.toFixed(1)}%`;
+
+  async function exportPdf() {
+    if (!result) return;
+    const { jsPDF } = await import("jspdf");
+    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    const W = doc.internal.pageSize.getWidth();
+    const margin = 14;
+    const col = (W - margin * 2) / 2;
+    let y = margin;
+
+    // ── Header ──
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    doc.text("Monte Carlo Simulation Report", margin, y);
+    y += 7;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(120);
+    doc.text(`Generated ${new Date().toLocaleString()} · ${N_SIM_TRIALS.toLocaleString()} trials`, margin, y);
+    doc.text(`Bankroll: ${fmt(parseFloat(bankroll))} · Payout: ${payout}×`, W - margin, y, { align: "right" });
+    y += 6;
+    doc.setDrawColor(220);
+    doc.line(margin, y, W - margin, y);
+    y += 5;
+
+    // ── Kelly Sizing table ──
+    doc.setTextColor(0);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.text("Kelly Sizing", margin, y);
+    y += 5;
+
+    const kellyHeaders = ["# Bets", "EV", "Full Kelly", "Half Kelly", "Bet Amt", "Total Stake"];
+    const colWidths = [18, 18, 24, 24, 24, 28];
+    doc.setFontSize(7.5);
+    doc.setFont("helvetica", "bold");
+    doc.setFillColor(245, 245, 248);
+    doc.rect(margin, y - 3.5, W - margin * 2, 5, "F");
+    let cx = margin;
+    kellyHeaders.forEach((h, i) => { doc.text(h, cx, y); cx += colWidths[i]!; });
+    y += 3;
+    doc.setFont("helvetica", "normal");
+    for (const row of result.betSummary) {
+      const cells = [
+        String(row.numBets),
+        fmtPct(row.ev * 100),
+        fmtPct(row.kelly * 100),
+        fmtPct(row.halfKelly * 100),
+        fmt(row.amount),
+        fmt(row.numBets * row.amount),
+      ];
+      cx = margin;
+      cells.forEach((c, i) => { doc.text(c, cx, y); cx += colWidths[i]!; });
+      y += 4.5;
+    }
+    y += 2;
+    doc.setFont("helvetica", "bold");
+    doc.text(`Total Stake: ${fmt(result.totalStake)}`, margin, y);
+    doc.text(`Expected Profit: ${fmt(result.totalExpectedProfit)}`, margin + 60, y);
+    doc.text(`Expected Final: ${fmt(result.expectedFinal)}`, margin + 120, y);
+    y += 7;
+
+    doc.setDrawColor(220);
+    doc.line(margin, y, W - margin, y);
+    y += 5;
+
+    // ── Monte Carlo stats grid ──
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.text("Monte Carlo Distribution", margin, y);
+    y += 5;
+
+    const stats = [
+      ["Mean",         fmt(result.mean)],
+      ["P10",          fmt(result.p10)],
+      ["P50 (Median)", fmt(result.p50)],
+      ["P90",          fmt(result.p90)],
+      ["95% CI Low",   fmt(result.ciLo)],
+      ["95% CI High",  fmt(result.ciHi)],
+      ["Prob Loss",    fmtPct(result.probLoss * 100)],
+      ["CVaR 5%",      fmt(result.cvar5)],
+      ["Sharpe",       result.sharpe.toFixed(3)],
+      ["Sortino",      result.sortino.toFixed(3)],
+      ["E[ΔBR]",       fmt(result.difference)],
+      ["E[ΔBR %]",     fmtPct(result.pctDiff)],
+    ];
+
+    doc.setFontSize(8);
+    stats.forEach(([label, value], i) => {
+      const isRight = i % 2 === 1;
+      const x = margin + (isRight ? col + 4 : 0);
+      if (!isRight) {
+        doc.setFillColor(i % 4 < 2 ? 250 : 245, i % 4 < 2 ? 250 : 245, i % 4 < 2 ? 253 : 248);
+        doc.rect(margin, y - 3.5, W - margin * 2, 5, "F");
+      }
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(100);
+      doc.text(label!, x, y);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(0);
+      doc.text(value!, x + col / 2, y);
+      if (isRight) y += 5;
+    });
+    y += 7;
+
+    // ── ASCII histogram ──
+    doc.setDrawColor(220);
+    doc.line(margin, y, W - margin, y);
+    y += 5;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(0);
+    doc.text("Distribution of Final Bankroll", margin, y);
+    y += 4;
+
+    const maxCount = Math.max(...result.histData.map(b => b.count));
+    const barAreaW = W - margin * 2;
+    const barAreaH = 28;
+    const barW = barAreaW / result.histData.length;
+    const br2 = parseFloat(bankroll);
+
+    result.histData.forEach((bin, i) => {
+      const barH = maxCount > 0 ? (bin.count / maxCount) * barAreaH : 0;
+      const bx = margin + i * barW;
+      const by = y + barAreaH - barH;
+      doc.setFillColor(bin.x < br2 ? 239 : 99, bin.x < br2 ? 68 : 102, bin.x < br2 ? 68 : 241);
+      doc.setDrawColor(255, 255, 255);
+      doc.rect(bx, by, barW - 0.3, barH, "F");
+    });
+    y += barAreaH + 3;
+
+    // x-axis labels (5 evenly spaced)
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(6.5);
+    doc.setTextColor(120);
+    const labelIdxs = [0, 7, 14, 21, 29];
+    for (const li of labelIdxs) {
+      const bin = result.histData[li];
+      if (!bin) continue;
+      const lx = margin + li * barW;
+      doc.text(fmt(bin.x), lx, y, { maxWidth: barW * 6 });
+    }
+    y += 5;
+
+    // ── Footer ──
+    doc.setFontSize(7);
+    doc.setTextColor(160);
+    doc.text("Milly Maker · Monte Carlo Simulator · For informational use only", W / 2, doc.internal.pageSize.getHeight() - 8, { align: "center" });
+
+    doc.save(`mc-sim-${new Date().toISOString().slice(0, 10)}.pdf`);
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Inputs */}
+      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5">
+        <h3 className="mb-4 text-sm font-semibold text-[var(--color-text-primary)]">Parameters</h3>
+        <div className="mb-4 grid grid-cols-2 gap-4 sm:grid-cols-2">
+          <div>
+            <label className="mb-1 block text-xs text-[var(--color-text-subtle)]">Bankroll</label>
+            <input
+              type="number" step="1" value={bankroll}
+              onChange={(e) => setBankroll(e.target.value)}
+              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:border-[var(--color-primary)] focus:outline-none"
+              placeholder="e.g. 500"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-[var(--color-text-subtle)]">Payout Multiplier</label>
+            <input
+              type="number" step="0.1" value={payout}
+              onChange={(e) => setPayout(e.target.value)}
+              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:border-[var(--color-primary)] focus:outline-none"
+              placeholder="e.g. 3.5"
+            />
+          </div>
+        </div>
+
+        {/* Bet groups table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-[var(--color-border)] text-left text-[var(--color-text-subtle)]">
+                <th className="pb-2 pr-3 font-medium"># Bets</th>
+                <th className="pb-2 pr-3 font-medium">EV Min %</th>
+                <th className="pb-2 pr-3 font-medium">EV Max %</th>
+                <th className="pb-2 pr-3 font-medium">Manual Amt</th>
+                <th className="pb-2"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--color-border)]">
+              {rows.map((row) => (
+                <tr key={row.id}>
+                  {(["numBets", "evMin", "evMax", "manualAmount"] as const).map((field) => (
+                    <td key={field} className="py-1.5 pr-3">
+                      <input
+                        type="number" step="1" value={row[field]}
+                        onChange={(e) => updateRow(row.id, field, e.target.value)}
+                        className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 focus:border-[var(--color-primary)] focus:outline-none"
+                        placeholder={field === "manualAmount" ? "auto" : ""}
+                      />
+                    </td>
+                  ))}
+                  <td className="py-1.5">
+                    <button onClick={() => removeRow(row.id)} className="text-[var(--color-text-subtle)] hover:text-red-500">✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="mt-3 flex gap-3">
+          <button
+            onClick={addRow}
+            className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text-subtle)] hover:border-[var(--color-primary)] hover:text-[var(--color-primary)]"
+          >+ Add Bet Group</button>
+          <button
+            onClick={runSim}
+            className="rounded-lg bg-[var(--color-primary)] px-4 py-1.5 text-xs font-semibold text-white hover:opacity-90"
+          >Run Simulation</button>
+          {result && (
+            <button
+              onClick={() => void exportPdf()}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text-subtle)] hover:border-[var(--color-primary)] hover:text-[var(--color-primary)]"
+            >
+              <FileDown size={12} />
+              Export PDF
+            </button>
+          )}
+        </div>
+      </div>
+
+      {result && (
+        <>
+          {/* Kelly summary */}
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5">
+            <h3 className="mb-3 text-sm font-semibold text-[var(--color-text-primary)]">Kelly Sizing</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-[var(--color-border)] text-left text-[var(--color-text-subtle)]">
+                    <th className="pb-2 pr-4 font-medium"># Bets</th>
+                    <th className="pb-2 pr-4 font-medium">EV</th>
+                    <th className="pb-2 pr-4 font-medium">Full Kelly</th>
+                    <th className="pb-2 pr-4 font-medium">Half Kelly</th>
+                    <th className="pb-2 pr-4 font-medium">Bet Amount</th>
+                    <th className="pb-2 font-medium">Total Stake</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-border)]">
+                  {result.betSummary.map((row, i) => (
+                    <tr key={i}>
+                      <td className="py-1.5 pr-4 font-mono">{row.numBets}</td>
+                      <td className="py-1.5 pr-4 font-mono">{fmtPct(row.ev * 100)}</td>
+                      <td className="py-1.5 pr-4 font-mono">{fmtPct(row.kelly * 100)}</td>
+                      <td className="py-1.5 pr-4 font-mono">{fmtPct(row.halfKelly * 100)}</td>
+                      <td className="py-1.5 pr-4 font-mono">{fmt(row.amount)}</td>
+                      <td className="py-1.5 font-mono">{fmt(row.numBets * row.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-4 border-t border-[var(--color-border)] pt-4 sm:grid-cols-4">
+              <div>
+                <div className="text-xs text-[var(--color-text-subtle)]">Total Stake</div>
+                <div className="font-mono text-sm font-semibold text-[var(--color-text-primary)]">{fmt(result.totalStake)}</div>
+                <div className="text-xs text-[var(--color-text-subtle)]">→ Target Spend</div>
+              </div>
+              <div>
+                <div className="text-xs text-[var(--color-text-subtle)]">Expected Profit</div>
+                <div className={cn("font-mono text-sm font-semibold", result.totalExpectedProfit >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]")}>
+                  {fmt(result.totalExpectedProfit)}
+                </div>
+                <div className="text-xs text-[var(--color-text-subtle)]">→ Target P/L</div>
+              </div>
+              <div>
+                <div className="text-xs text-[var(--color-text-subtle)]">Expected Final</div>
+                <div className="font-mono text-sm font-semibold text-[var(--color-text-primary)]">{fmt(result.expectedFinal)}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* MC distribution */}
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5">
+            <h3 className="mb-3 text-sm font-semibold text-[var(--color-text-primary)]">Monte Carlo Distribution ({N_SIM_TRIALS.toLocaleString()} trials)</h3>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              {[
+                { label: "Mean", value: fmt(result.mean) },
+                { label: "P10", value: fmt(result.p10) },
+                { label: "P50 (Median)", value: fmt(result.p50) },
+                { label: "P90", value: fmt(result.p90) },
+                { label: "95% CI Low", value: fmt(result.ciLo) },
+                { label: "95% CI High", value: fmt(result.ciHi) },
+                { label: "Prob Loss", value: fmtPct(result.probLoss * 100) },
+                { label: "CVaR 5%", value: fmt(result.cvar5) },
+                { label: "Sharpe", value: result.sharpe.toFixed(3) },
+                { label: "Sortino", value: result.sortino.toFixed(3) },
+                { label: "E[ΔBR]", value: fmt(result.difference) },
+                { label: "E[ΔBR %]", value: fmtPct(result.pctDiff) },
+              ].map(({ label, value }) => (
+                <div key={label} className="rounded-lg bg-[var(--color-surface)] p-3">
+                  <div className="text-xs text-[var(--color-text-subtle)]">{label}</div>
+                  <div className="font-mono text-sm font-semibold text-[var(--color-text-primary)]">{value}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Simple bar histogram */}
+            <div className="mt-4">
+              <div className="mb-1 text-xs text-[var(--color-text-subtle)]">Distribution of Final Bankroll</div>
+              <div className="flex h-24 items-end gap-px overflow-hidden rounded">
+                {result.histData.map((bin, i) => {
+                  const maxCount = Math.max(...result.histData.map((b) => b.count));
+                  const heightPct = maxCount > 0 ? (bin.count / maxCount) * 100 : 0;
+                  const isLoss = bin.x < parseFloat(bankroll);
+                  return (
+                    <div
+                      key={i}
+                      title={`${fmt(bin.x)}: ${bin.count}`}
+                      style={{ height: `${heightPct}%`, flex: 1 }}
+                      className={cn("min-h-px", isLoss ? "bg-red-500/60" : "bg-[var(--color-primary)]/60")}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Underdog Bet Log ──────────────────────────────────────────────────────────
+
+const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function monthLabel(yyyyMm: string): string {
+  const [y, m] = yyyyMm.split("-");
+  return `${MONTH_NAMES[parseInt(m ?? "1") - 1]} ${y}`;
+}
+
+/** Returns sorted unique YYYY-MM strings covering all bets + targets + current month */
+function buildMonthRange(bets: UnderdogBet[], targets: UnderdogMonthlyTarget[]): string[] {
+  const set = new Set<string>();
+  const now = new Date().toISOString().slice(0, 7);
+  set.add(now);
+  for (const b of bets) set.add(b.entry_date.slice(0, 7));
+  for (const t of targets) set.add(t.month);
+  return [...set].sort();
+}
+
+interface MonthRow {
+  month: string;
+  betTotal: number;
+  betsMade: number;
+  legs: number;
+  legsHit: number;
+  legsPushed: number;
+  legsHitPct: number | null;
+  legsHitPushPct: number | null;
+  itmPct: number | null;
+  totalEv: number | null;
+  totalSettled: number;
+  settledBets: number;
+  actualPL: number;
+  plPct: number | null;
+  roiPerBet: number | null;
+  // manual / from targets
+  targetSpend: number | null;
+  targetPL: number | null;
+  startingBR: number | null;
+  bonuses: number | null;
+  // derived
+  endingBR: number | null;
+  expectedBR: number | null;
+  actualGrowthPct: number | null;
+}
+
+function buildMonthRows(
+  bets: UnderdogBet[],
+  targets: UnderdogMonthlyTarget[],
+  months: string[]
+): MonthRow[] {
+  const targetMap = new Map(targets.map((t) => [t.month, t]));
+
+  return months.map((month) => {
+    const mb = bets.filter((b) => b.entry_date.startsWith(month));
+    const settled = mb.filter((b) => b.settled !== null);
+
+    const betTotal = mb.reduce((s, b) => s + b.entry_size, 0);
+    const betsMade = mb.length;
+    const legs = mb.reduce((s, b) => s + b.legs, 0);
+    const legsHit = mb.reduce((s, b) => s + (b.legs_hit ?? 0), 0);
+    const legsPushed = mb.reduce((s, b) => s + (b.legs_pushed ?? 0), 0);
+    const legsHitPct = legs > 0 ? legsHit / legs : null;
+    const legsHitPushPct = legs > 0 ? (legsHit + legsPushed) / legs : null;
+
+    const wins = settled.filter((b) => (b.settled ?? 0) > b.entry_size).length;
+    const itmPct = settled.length > 0 ? wins / settled.length : null;
+
+    const evBets = mb.filter((b) => b.ev_amount != null);
+    const totalEv = evBets.length > 0 ? evBets.reduce((s, b) => s + (b.ev_amount ?? 0), 0) : null;
+    const totalSettled = settled.reduce((s, b) => s + (b.settled ?? 0), 0);
+    const settledEntries = settled.reduce((s, b) => s + b.entry_size, 0);
+    const actualPL = totalSettled - settledEntries;
+    const plPct = settledEntries > 0 ? actualPL / settledEntries : null;
+    const roiPerBet = settled.length > 0 ? actualPL / settled.length : null;
+
+    const t = targetMap.get(month);
+    const targetSpend = t?.target_spend ?? null;
+    const targetPL = t?.target_pl ?? null;
+    const startingBR = t?.starting_br ?? null;
+    const bonuses = t?.bonuses ?? null;
+
+    const endingBR = startingBR != null ? startingBR + actualPL : null;
+    const expectedBR = startingBR != null && targetPL != null ? startingBR + targetPL : null;
+    const actualGrowthPct = endingBR != null && endingBR !== 0 ? actualPL / endingBR : null;
+
+    return {
+      month, betTotal, betsMade, legs, legsHit, legsPushed,
+      legsHitPct, legsHitPushPct, itmPct,
+      totalEv, totalSettled, settledBets: settled.length, actualPL, plPct, roiPerBet,
+      targetSpend, targetPL, startingBR, bonuses,
+      endingBR, expectedBR, actualGrowthPct,
+    };
+  });
+}
+
+function EditableCell({
+  value,
+  onSave,
+  prefix = "",
+  suffix = "",
+  placeholder = "—",
+}: {
+  value: number | null;
+  onSave: (v: number | null) => void;
+  prefix?: string;
+  suffix?: string;
+  placeholder?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  function startEdit() {
+    setDraft(value != null ? String(value) : "");
+    setEditing(true);
+  }
+
+  function commit() {
+    const parsed = draft.trim() !== "" ? parseFloat(draft) : null;
+    onSave(isNaN(parsed!) ? null : parsed);
+    setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        type="number"
+        step="0.01"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false); }}
+        className="w-24 rounded border border-[var(--color-primary)] bg-[var(--color-surface-raised)] px-1.5 py-0.5 text-right text-xs font-mono focus:outline-none"
+      />
+    );
+  }
+
+  return (
+    <button
+      onClick={startEdit}
+      title="Click to edit"
+      className="group flex w-full items-center justify-end gap-1 text-right"
+    >
+      <span className={cn("font-mono text-xs", value == null ? "text-[var(--color-text-subtle)]" : "")}>
+        {value != null ? `${prefix}${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${suffix}` : placeholder}
+      </span>
+      <span className="opacity-0 group-hover:opacity-50 text-[9px] text-[var(--color-text-subtle)]">✎</span>
+    </button>
+  );
+}
+
+function UnderdogBetLog({ accountId }: { accountId: string }) {
+  const { bets, addBet, editBet, removeBet } = useUnderdogBets(accountId);
+  const { targets, saveTarget } = useUnderdogTargets(accountId);
+
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingBet, setEditingBet] = useState<UnderdogBet | null>(null);
+  const [form, setForm] = useState<BetFormState>(EMPTY_BET_FORM);
+  const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  // ── Monthly summary ────────────────────────────────────────────────────────
+  const months = React.useMemo(() => buildMonthRange(bets, targets), [bets, targets]);
+  const monthRows = React.useMemo(() => buildMonthRows(bets, targets, months), [bets, targets, months]);
+
+  // ── Bet dialog helpers ─────────────────────────────────────────────────────
+  function openAdd() {
+    setEditingBet(null);
+    setForm({ ...EMPTY_BET_FORM, entry_date: new Date().toISOString().slice(0, 10) });
+    setDialogOpen(true);
+  }
+
+  function openEdit(b: UnderdogBet) {
+    setEditingBet(b);
+    setForm(betToForm(b));
+    setDialogOpen(true);
+  }
+
+  function updateForm(field: keyof BetFormState, value: string | boolean) {
+    setForm((prev) => {
+      const next = { ...prev, [field]: value };
+      if (field === "bet_type" && typeof value === "string") {
+        const defaultLegs = LEG_DEFAULTS[value];
+        if (defaultLegs && prev.legs === String(LEG_DEFAULTS[prev.bet_type] ?? "")) {
+          next.legs = String(defaultLegs);
+        }
+      }
+      // Auto-calculate ev_amount from EV% × entry_size
+      if (field === "oddsjam_ev" || field === "entry_size") {
+        const ev = parseFloat(field === "oddsjam_ev" ? (value as string) : prev.oddsjam_ev);
+        const entry = parseFloat(field === "entry_size" ? (value as string) : prev.entry_size);
+        if (!isNaN(ev) && !isNaN(entry) && entry > 0) {
+          next.ev_amount = ((ev / 100) * entry).toFixed(2);
+        }
+      }
+      return next;
+    });
+  }
+
+  async function handleSave() {
+    if (!form.entry_size || !form.entry_date) return;
+    setSaving(true);
+    try {
+      const data = betFormToData(form, accountId);
+      if (editingBet) {
+        const { account_id: _a, ...rest } = data;
+        await editBet(editingBet.id, rest);
+      } else {
+        await addBet(data);
+      }
+      setDialogOpen(false);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ── Totals row (all months) ────────────────────────────────────────────────
+  const totals = React.useMemo(() => {
+    const settled = bets.filter((b) => b.settled !== null);
+    const totalLegs = bets.reduce((s, b) => s + b.legs, 0);
+    const totalHit = bets.reduce((s, b) => s + (b.legs_hit ?? 0), 0);
+    const totalPushed = bets.reduce((s, b) => s + (b.legs_pushed ?? 0), 0);
+    const totalSettled = settled.reduce((s, b) => s + (b.settled ?? 0), 0);
+    const settledEntries = settled.reduce((s, b) => s + b.entry_size, 0);
+    const actualPL = totalSettled - settledEntries;
+    return {
+      betTotal: bets.reduce((s, b) => s + b.entry_size, 0),
+      betsMade: bets.length,
+      legs: totalLegs,
+      legsHit: totalHit,
+      legsPushed: totalPushed,
+      legsHitPct: totalLegs > 0 ? totalHit / totalLegs : null,
+      legsHitPushPct: totalLegs > 0 ? (totalHit + totalPushed) / totalLegs : null,
+      itmPct: settled.length > 0 ? settled.filter(b => (b.settled ?? 0) > b.entry_size).length / settled.length : null,
+      totalEv: bets.filter(b => b.ev_amount != null).reduce((s, b) => s + (b.ev_amount ?? 0), 0),
+      totalSettled,
+      actualPL,
+      plPct: settledEntries > 0 ? actualPL / settledEntries : null,
+      roiPerBet: settled.length > 0 ? actualPL / settled.length : null,
+    };
+  }, [bets]);
+
+  const riskStats = React.useMemo(() => {
+    if (bets.length === 0) return null;
+    const sorted = [...bets].sort((a, b) => a.entry_date.localeCompare(b.entry_date));
+
+    // Running P&L → drawdown
+    let running = 0, peak = 0, maxDrawdown = 0;
+    for (const b of sorted) {
+      running += (b.settled ?? 0) - b.entry_size;
+      if (running > peak) peak = running;
+      const dd = peak - running;
+      if (dd > maxDrawdown) maxDrawdown = dd;
+    }
+    const currentDrawdown = peak - running;
+
+    // Max profit day (settled bets grouped by entry_date)
+    const byDay = new Map<string, number>();
+    for (const b of sorted) {
+      if (b.settled !== null) {
+        byDay.set(b.entry_date, (byDay.get(b.entry_date) ?? 0) + (b.settled - b.entry_size));
+      }
+    }
+    let maxProfitDay: { date: string; amount: number } | null = null;
+    for (const [date, amount] of byDay) {
+      if (maxProfitDay === null || amount > maxProfitDay.amount) maxProfitDay = { date, amount };
+    }
+
+    // Longest consecutive losing streak (settled bets)
+    let streak = 0, maxStreak = 0;
+    for (const b of sorted) {
+      if (b.settled !== null) {
+        if (b.settled - b.entry_size < 0) { streak++; maxStreak = Math.max(maxStreak, streak); }
+        else streak = 0;
+      }
+    }
+
+    return { maxDrawdown, currentDrawdown, maxProfitDay, maxLossStreak: maxStreak };
+  }, [bets]);
+
+  const pct = (v: number | null) => v != null ? `${(v * 100).toFixed(2)}%` : "—";
+  const cur = (v: number | null) => v != null ? formatCurrency(v) : "—";
+
+  return (
+    <div className="flex flex-col gap-5">
+
+      {/* ── Monthly Summary Table ────────────────────────────────────────────── */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-semibold">Monthly Summary</CardTitle>
+          <p className="text-[10px] text-[var(--color-text-subtle)]">
+            Click <span className="font-medium text-[var(--color-primary)]">Target Spend</span>, <span className="font-medium text-[var(--color-primary)]">Target P/L</span>, <span className="font-medium text-[var(--color-primary)]">Starting BR</span>, and <span className="font-medium text-[var(--color-primary)]">Bonuses</span> cells to edit · Target values come from Simulator tab
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs whitespace-nowrap">
+              <thead>
+                <tr className="border-b border-[var(--color-border-subtle)] text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                  <th className="pb-2 pr-4 text-left sticky left-0 bg-[var(--color-surface)]">Month</th>
+                  <th className="pb-2 pr-3 text-right">Bet Total</th>
+                  <th className="pb-2 pr-3 text-right">Bets</th>
+                  <th className="pb-2 pr-3 text-right">Legs</th>
+                  <th className="pb-2 pr-3 text-right">Hit</th>
+                  <th className="pb-2 pr-3 text-right">Push</th>
+                  <th className="pb-2 pr-3 text-right">Hit%</th>
+                  <th className="pb-2 pr-3 text-right">Hit+Push%</th>
+                  <th className="pb-2 pr-3 text-right">Win Rate</th>
+                  <th className="pb-2 pr-3 text-right">Actual Total EV</th>
+                  <th className="pb-2 pr-3 text-right">Settled</th>
+                  <th className="pb-2 pr-3 text-right text-[var(--color-primary)]">Target Spend ✎</th>
+                  <th className="pb-2 pr-3 text-right text-[var(--color-primary)]">Target P/L ✎</th>
+                  <th className="pb-2 pr-3 text-right">Actual P/L</th>
+                  <th className="pb-2 pr-3 text-right">P/L%</th>
+                  <th className="pb-2 pr-3 text-right">ROI/Bet</th>
+                  <th className="pb-2 pr-3 text-right text-[var(--color-primary)]">Starting BR ✎</th>
+                  <th className="pb-2 pr-3 text-right">Ending BR</th>
+                  <th className="pb-2 pr-3 text-right">Expected BR</th>
+                  <th className="pb-2 pr-3 text-right">Net Growth%</th>
+                  <th className="pb-2 text-right text-[var(--color-primary)]">Bonuses ✎</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--color-border-subtle)]">
+                {[...monthRows].reverse().map((row) => {
+                  const isCurrentMonth = row.month === new Date().toISOString().slice(0, 7);
+                  const hasActivity = row.betsMade > 0 || row.startingBR != null || row.targetSpend != null;
+                  if (!hasActivity && !isCurrentMonth) return null;
+                  return (
+                    <tr key={row.month} className={cn("group", isCurrentMonth && "bg-[var(--color-primary)]/5")}>
+                      <td className="py-2 pr-4 font-semibold sticky left-0 bg-[var(--color-surface)] group-[.bg-primary\\/5]:bg-[var(--color-primary)]/5">
+                        {monthLabel(row.month)}
+                        {isCurrentMonth && <span className="ml-1.5 text-[9px] text-[var(--color-primary)]">now</span>}
+                      </td>
+                      <td className="py-2 pr-3 text-right font-mono">{row.betsMade > 0 ? cur(row.betTotal) : "—"}</td>
+                      <td className="py-2 pr-3 text-right">{row.betsMade || "—"}</td>
+                      <td className="py-2 pr-3 text-right">{row.legs || "—"}</td>
+                      <td className="py-2 pr-3 text-right">{row.legsHit || "—"}</td>
+                      <td className="py-2 pr-3 text-right">{row.legsPushed || "—"}</td>
+                      <td className="py-2 pr-3 text-right">{pct(row.legsHitPct)}</td>
+                      <td className="py-2 pr-3 text-right">{pct(row.legsHitPushPct)}</td>
+                      <td className="py-2 pr-3 text-right">{pct(row.itmPct)}</td>
+                      <td className="py-2 pr-3 text-right font-mono">{row.totalEv != null ? formatCurrency(row.totalEv) : "—"}</td>
+                      <td className="py-2 pr-3 text-right font-mono">{row.settledBets > 0 ? cur(row.totalSettled) : "—"}</td>
+                      {/* Editable: target spend */}
+                      <td className="py-2 pr-3">
+                        <EditableCell value={row.targetSpend} prefix="$"
+                          onSave={(v) => saveTarget(row.month, "target_spend", v)} />
+                      </td>
+                      {/* Editable: target P/L */}
+                      <td className="py-2 pr-3">
+                        <EditableCell value={row.targetPL} prefix="$"
+                          onSave={(v) => saveTarget(row.month, "target_pl", v)} />
+                      </td>
+                      <td className={cn("py-2 pr-3 text-right font-mono font-semibold",
+                        row.settledBets > 0 ? (row.actualPL >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]") : "text-[var(--color-text-subtle)]"
+                      )}>
+                        {row.settledBets > 0 ? `${row.actualPL >= 0 ? "+" : ""}${formatCurrency(row.actualPL)}` : "—"}
+                      </td>
+                      <td className="py-2 pr-3 text-right">{pct(row.plPct)}</td>
+                      <td className="py-2 pr-3 text-right font-mono">{row.roiPerBet != null ? formatCurrency(row.roiPerBet) : "—"}</td>
+                      {/* Editable: starting bankroll */}
+                      <td className="py-2 pr-3">
+                        <EditableCell value={row.startingBR} prefix="$"
+                          onSave={(v) => saveTarget(row.month, "starting_br", v)} />
+                      </td>
+                      <td className="py-2 pr-3 text-right font-mono">{cur(row.endingBR)}</td>
+                      <td className="py-2 pr-3 text-right font-mono">{cur(row.expectedBR)}</td>
+                      <td className={cn("py-2 pr-3 text-right",
+                        row.actualGrowthPct != null ? (row.actualGrowthPct >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]") : ""
+                      )}>
+                        {pct(row.actualGrowthPct)}
+                      </td>
+                      {/* Editable: bonuses */}
+                      <td className="py-2">
+                        <EditableCell value={row.bonuses} prefix="$"
+                          onSave={(v) => saveTarget(row.month, "bonuses", v)} />
+                      </td>
+                    </tr>
+                  );
+                })}
+
+                {/* Totals row */}
+                {bets.length > 0 && (
+                  <tr className="border-t-2 border-[var(--color-border)] font-semibold">
+                    <td className="py-2 pr-4 sticky left-0 bg-[var(--color-surface)] text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total</td>
+                    <td className="py-2 pr-3 text-right font-mono">{formatCurrency(totals.betTotal)}</td>
+                    <td className="py-2 pr-3 text-right">{totals.betsMade}</td>
+                    <td className="py-2 pr-3 text-right">{totals.legs}</td>
+                    <td className="py-2 pr-3 text-right">{totals.legsHit}</td>
+                    <td className="py-2 pr-3 text-right">{totals.legsPushed}</td>
+                    <td className="py-2 pr-3 text-right">{pct(totals.legsHitPct)}</td>
+                    <td className="py-2 pr-3 text-right">{pct(totals.legsHitPushPct)}</td>
+                    <td className="py-2 pr-3 text-right">{pct(totals.itmPct)}</td>
+                    <td className="py-2 pr-3 text-right font-mono">{formatCurrency(totals.totalEv)}</td>
+                    <td className="py-2 pr-3 text-right font-mono">{formatCurrency(totals.totalSettled)}</td>
+                    <td className="py-2 pr-3" />
+                    <td className="py-2 pr-3" />
+                    <td className={cn("py-2 pr-3 text-right font-mono", totals.actualPL >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]")}>
+                      {totals.actualPL >= 0 ? "+" : ""}{formatCurrency(totals.actualPL)}
+                    </td>
+                    <td className="py-2 pr-3 text-right">{pct(totals.plPct)}</td>
+                    <td className="py-2 pr-3 text-right font-mono">{totals.roiPerBet != null ? formatCurrency(totals.roiPerBet) : "—"}</td>
+                    <td colSpan={5} />
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ── Risk Stats ────────────────────────────────────────────────────────── */}
+      {riskStats && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {[
+            {
+              label: "Max Drawdown",
+              value: formatCurrency(riskStats.maxDrawdown),
+              sub: "peak → trough",
+              danger: riskStats.maxDrawdown > 0,
+            },
+            {
+              label: "Current Drawdown",
+              value: formatCurrency(riskStats.currentDrawdown),
+              sub: riskStats.currentDrawdown === 0 ? "at peak" : "from peak",
+              danger: riskStats.currentDrawdown > 0,
+            },
+            {
+              label: "Best Day",
+              value: riskStats.maxProfitDay ? formatCurrency(riskStats.maxProfitDay.amount) : "—",
+              sub: riskStats.maxProfitDay ? formatDate(riskStats.maxProfitDay.date) : "no settled bets",
+              success: riskStats.maxProfitDay != null && riskStats.maxProfitDay.amount > 0,
+            },
+            {
+              label: "Longest Loss Streak",
+              value: riskStats.maxLossStreak > 0 ? `${riskStats.maxLossStreak} bets` : "—",
+              sub: "consecutive losses",
+              danger: riskStats.maxLossStreak >= 3,
+            },
+          ].map(({ label, value, sub, danger, success }) => (
+            <div key={label} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-subtle)]">{label}</div>
+              <div className={cn("mt-1 font-mono text-lg font-semibold",
+                danger ? "text-[var(--color-danger)]" : success ? "text-[var(--color-success)]" : "text-[var(--color-text-primary)]"
+              )}>{value}</div>
+              <div className="text-[10px] text-[var(--color-text-subtle)]">{sub}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Bet Log ───────────────────────────────────────────────────────────── */}
+      <Card>
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm font-semibold">
+              Bet Log
+              {bets.filter(b => b.settled === null).length > 0 && (
+                <span className="ml-2 text-[10px] font-normal text-[var(--color-text-muted)]">
+                  {bets.filter(b => b.settled === null).length} pending
+                </span>
+              )}
+            </CardTitle>
+            <Button size="sm" onClick={openAdd}>
+              <Plus size={14} /> Log Entry
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {bets.length === 0 ? (
+            <p className="py-6 text-center text-sm text-[var(--color-text-subtle)]">No bets logged yet.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[var(--color-border-subtle)] text-xs text-[var(--color-text-muted)]">
+                    <th className="pb-2 text-left font-medium">Date</th>
+                    <th className="pb-2 text-left font-medium">Type</th>
+                    <th className="pb-2 text-right font-medium">Entry</th>
+                    <th className="pb-2 text-center font-medium">Legs</th>
+                    <th className="pb-2 text-center font-medium">Hit / Push</th>
+                    <th className="pb-2 text-right font-medium">EV</th>
+                    <th className="pb-2 text-right font-medium">Settled</th>
+                    <th className="pb-2 text-right font-medium">Tax</th>
+                    <th className="pb-2 text-left font-medium">Entry ID</th>
+                    <th className="pb-2 pl-4 text-left font-medium border-l border-[var(--color-border)]">Promo</th>
+                    <th className="pb-2 text-left font-medium">Notes</th>
+                    <th className="pb-2" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-border-subtle)]">
+                  {bets.map((b) => {
+                    const isPending = b.settled === null;
+                    return (
+                      <tr key={b.id} className="group">
+                        <td className="py-2 pr-3 text-[var(--color-text-muted)] tabular-nums text-xs">
+                          {formatDate(b.entry_date)}
+                        </td>
+                        <td className="py-2 pr-3">
+                          <span className="rounded-full bg-[var(--color-primary)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--color-primary)] whitespace-nowrap">
+                            {b.bet_type}
+                          </span>
+                          {b.rescued && <span className="ml-1 text-[10px] text-[#f79009]" title="Rescued">↩</span>}
+                        </td>
+                        <td className="py-2 pr-3 text-right font-mono tabular-nums text-xs">{formatCurrency(b.entry_size)}</td>
+                        <td className="py-2 pr-3 text-center text-[var(--color-text-muted)] text-xs">{b.legs}</td>
+                        <td className="py-2 pr-3 text-center text-xs">
+                          {isPending ? (
+                            <span className="text-[var(--color-text-subtle)]">—</span>
+                          ) : (
+                            <span>
+                              <span className={b.legs_hit === b.legs ? "text-[var(--color-success)] font-semibold" : ""}>{b.legs_hit ?? "?"}</span>
+                              {(b.legs_pushed ?? 0) > 0 && <span className="text-[var(--color-text-subtle)]">/{b.legs_pushed}p</span>}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-3 text-right text-[var(--color-text-muted)] text-xs">
+                          {b.oddsjam_ev != null ? `${(b.oddsjam_ev * 100).toFixed(1)}%` : "—"}
+                        </td>
+                        <td className="py-2 pr-3 text-right font-mono tabular-nums text-xs">
+                          {isPending ? (
+                            <Badge variant="outline" className="text-[10px]">Pending</Badge>
+                          ) : formatCurrency(b.settled ?? 0)}
+                        </td>
+                        <td className="py-2 pr-3 text-right font-mono tabular-nums text-xs text-[var(--color-danger)]">
+                          {b.tax != null ? formatCurrency(b.tax) : <span className="text-[var(--color-text-subtle)]">—</span>}
+                        </td>
+                        <td className="py-2 pr-3 text-xs text-[var(--color-text-subtle)] font-mono">
+                          {b.entry_id ?? "—"}
+                        </td>
+                        <td className="py-2 pl-4 pr-3 text-xs text-[var(--color-text-subtle)] whitespace-nowrap border-l border-[var(--color-border)]">
+                          {b.promo ?? "—"}
+                        </td>
+                        <td className="py-2 pr-3 text-xs text-[var(--color-text-subtle)] max-w-[200px] truncate">
+                          {b.notes ?? "—"}
+                        </td>
+                        <td className="py-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                          <button onClick={() => openEdit(b)} className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-text)]">
+                            <Settings2 size={13} />
+                          </button>
+                          <button onClick={() => setConfirmDelete(b.id)} className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]">
+                            <Trash2 size={13} />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Add / Edit dialog */}
+      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} title={editingBet ? "Edit Entry" : "Log Bet Entry"}>
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="Date" type="date" value={form.entry_date}
+              onChange={(e) => updateForm("entry_date", e.target.value)} />
+            <Select label="Bet Type" value={form.bet_type}
+              options={BET_TYPES.map((t) => ({ value: t, label: t }))}
+              onChange={(e) => updateForm("bet_type", e.target.value)} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="Entry ($)" type="number" step="0.01" placeholder="12" value={form.entry_size}
+              onChange={(e) => updateForm("entry_size", e.target.value)} />
+            <Input label="Legs" type="number" min="1" value={form.legs}
+              onChange={(e) => updateForm("legs", e.target.value)} />
+          </div>
+
+          <div className="border-t border-[var(--color-border-subtle)] pt-3">
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-[var(--color-text-subtle)]">OddsJam (optional)</p>
+            <div className="grid grid-cols-3 gap-3">
+              <Input label="% Chance" type="number" step="0.01" placeholder="2.45" value={form.oddsjam_hit}
+                onChange={(e) => updateForm("oddsjam_hit", e.target.value)} />
+              <Input label="+EV %" type="number" step="0.01" placeholder="8.50" value={form.oddsjam_ev}
+                onChange={(e) => updateForm("oddsjam_ev", e.target.value)} />
+              <div>
+                <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">EV Amount ($)</label>
+                <div className="flex h-9 items-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 font-mono text-sm text-[var(--color-text-muted)]">
+                  {form.ev_amount !== "" ? `$${form.ev_amount}` : <span className="text-[var(--color-text-subtle)] italic text-xs">auto</span>}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-[var(--color-border-subtle)] pt-3">
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-[var(--color-text-subtle)]">Result (fill when settled)</p>
+            <div className="grid grid-cols-3 gap-3">
+              <Input label="Legs Hit" type="number" min="0" placeholder="—" value={form.legs_hit}
+                onChange={(e) => updateForm("legs_hit", e.target.value)} />
+              <Input label="Legs Pushed" type="number" min="0" placeholder="0" value={form.legs_pushed}
+                onChange={(e) => updateForm("legs_pushed", e.target.value)} />
+              <Input label="Settled ($)" type="number" step="0.01" placeholder="pending" value={form.settled}
+                onChange={(e) => updateForm("settled", e.target.value)} />
+            </div>
+            <div className="mt-2">
+              <Input label="Tax withheld ($, optional)" type="number" step="0.01" min="0" placeholder="0.00" value={form.tax}
+                onChange={(e) => updateForm("tax", e.target.value)} />
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <input type="checkbox" id="rescued-chk" checked={form.rescued}
+                onChange={(e) => updateForm("rescued", e.target.checked)}
+                className="accent-[var(--color-primary)]" />
+              <label htmlFor="rescued-chk" className="text-sm cursor-pointer select-none">Rescued / Rebooted</label>
+            </div>
+          </div>
+
+          <div className="border-t border-[var(--color-border-subtle)] pt-3 grid grid-cols-2 gap-3">
+            <Input label="Promo" placeholder="50% BOOst" value={form.promo}
+              onChange={(e) => updateForm("promo", e.target.value)} />
+            <Input label="Entry ID (optional)" placeholder="UUID from Underdog" value={form.entry_id}
+              onChange={(e) => updateForm("entry_id", e.target.value)} />
+          </div>
+          <Input label="Notes" placeholder="Any context" value={form.notes}
+            onChange={(e) => updateForm("notes", e.target.value)} />
+
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" size="sm" onClick={() => setDialogOpen(false)}>Cancel</Button>
+            <Button size="sm" onClick={handleSave} disabled={saving || !form.entry_size || !form.entry_date}>
+              {saving ? "Saving…" : editingBet ? "Save Changes" : "Log Entry"}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+
+      {/* Confirm delete */}
+      <Dialog open={confirmDelete !== null} onClose={() => setConfirmDelete(null)} title="Delete Entry?">
+        <p className="text-sm text-[var(--color-text-muted)]">This entry will be permanently removed.</p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={() => setConfirmDelete(null)}>Cancel</Button>
+          <Button size="sm" onClick={async () => { if (confirmDelete) { await removeBet(confirmDelete); setConfirmDelete(null); } }}>
+            Delete
+          </Button>
+        </div>
+      </Dialog>
+    </div>
+  );
 }

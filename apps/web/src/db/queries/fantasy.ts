@@ -75,6 +75,10 @@ export interface FantasyBalanceSummary {
   net_betting_pnl: number;
   orphan_linked_in: number; // checking links with no matching fantasy_tx (old manual links)
   open_futures_stake: number; // stakes of open futures placed after account start date
+  open_bet_sessions_stake: number; // total_bet of unsettled bet sessions (reduces available balance)
+  underdog_net: number; // net effect of all underdog bets (pending subtracts entry, settled adds winnings)
+  contest_net: number; // net effect of all contests (entry fees out, settled winnings in)
+  lost_futures_stake: number; // stakes of lost futures placed after account start date
 }
 
 // ── Accounts ──────────────────────────────────────────────────────────────────
@@ -161,7 +165,11 @@ export async function getFantasyBalanceSummary(
       COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0.0 END), 0.0)::DOUBLE AS total_cashout,
       COALESCE(bs.net_betting_pnl, 0.0)::DOUBLE AS net_betting_pnl,
       COALESCE(orphan.orphan_linked_in, 0.0)::DOUBLE AS orphan_linked_in,
-      COALESCE(of_.open_futures_stake, 0.0)::DOUBLE AS open_futures_stake
+      COALESCE(of_.open_futures_stake, 0.0)::DOUBLE AS open_futures_stake,
+      COALESCE(obs.open_bet_sessions_stake, 0.0)::DOUBLE AS open_bet_sessions_stake,
+      COALESCE(ud.underdog_net, 0.0)::DOUBLE AS underdog_net,
+      COALESCE(cn.contest_net, 0.0)::DOUBLE AS contest_net,
+      COALESCE(lf.lost_futures_stake, 0.0)::DOUBLE AS lost_futures_stake
     FROM fantasy_accounts a
     LEFT JOIN fantasy_transactions t ON t.account_id = a.id
     LEFT JOIN (
@@ -188,8 +196,36 @@ export async function getFantasyBalanceSummary(
         AND f.placed_date > fa.starting_date
       GROUP BY f.account_id
     ) of_ ON of_.account_id = a.id
+    LEFT JOIN (
+      SELECT account_id,
+             SUM(total_bet)::DOUBLE AS open_bet_sessions_stake
+      FROM fantasy_bet_sessions
+      WHERE total_settled IS NULL
+      GROUP BY account_id
+    ) obs ON obs.account_id = a.id
+    LEFT JOIN (
+      SELECT account_id,
+             SUM(COALESCE(settled, 0.0) - COALESCE(tax, 0.0) - entry_size)::DOUBLE AS underdog_net
+      FROM underdog_bets
+      GROUP BY account_id
+    ) ud ON ud.account_id = a.id
+    LEFT JOIN (
+      SELECT account_id,
+             SUM(COALESCE(winnings, 0.0) - entry_fee)::DOUBLE AS contest_net
+      FROM fantasy_contests
+      GROUP BY account_id
+    ) cn ON cn.account_id = a.id
+    LEFT JOIN (
+      SELECT f.account_id,
+             SUM(f.stake)::DOUBLE AS lost_futures_stake
+      FROM fantasy_futures f
+      JOIN fantasy_accounts fa ON f.account_id = fa.id
+      WHERE f.status = 'lost'
+        AND f.placed_date > fa.starting_date
+      GROUP BY f.account_id
+    ) lf ON lf.account_id = a.id
     WHERE a.is_active = true
-    GROUP BY a.id, a.name, a.platform_type, a.starting_balance, a.starting_date, a.end_date, a.created_at, bs.net_betting_pnl, orphan.orphan_linked_in, of_.open_futures_stake
+    GROUP BY a.id, a.name, a.platform_type, a.starting_balance, a.starting_date, a.end_date, a.created_at, bs.net_betting_pnl, orphan.orphan_linked_in, of_.open_futures_stake, obs.open_bet_sessions_stake, ud.underdog_net, cn.contest_net, lf.lost_futures_stake
     ORDER BY a.created_at ASC
   `);
 
@@ -197,7 +233,7 @@ export async function getFantasyBalanceSummary(
   return rows.map((r) => ({
     ...r,
     current_balance: Math.round(
-      (r.starting_balance + r.total_deposited + r.orphan_linked_in - r.total_cashout + r.net_betting_pnl - r.open_futures_stake) * 100
+      (r.starting_balance + r.total_deposited + r.orphan_linked_in - r.total_cashout + r.net_betting_pnl - r.open_bet_sessions_stake + r.underdog_net + r.contest_net - r.lost_futures_stake) * 100
     ) / 100,
   }));
 }
@@ -506,6 +542,33 @@ export async function settleFantasyContest(
   await conn.query(`UPDATE fantasy_contests SET ${parts.join(", ")} WHERE id = '${id}'`);
 }
 
+export async function updateFantasyContest(
+  conn: AsyncDuckDBConnection,
+  id: string,
+  data: {
+    description?: string;
+    entry_fee?: number;
+    contest_size?: number | null;
+    finish_position?: number | null;
+    winnings?: number | null;
+    placed_date?: string;
+    settled_date?: string | null;
+    notes?: string | null;
+  }
+): Promise<void> {
+  const parts: string[] = [];
+  if (data.description != null) parts.push(`description = '${esc(data.description)}'`);
+  if (data.entry_fee != null) parts.push(`entry_fee = ${data.entry_fee}`);
+  if ("contest_size" in data) parts.push(data.contest_size != null ? `contest_size = ${data.contest_size}` : "contest_size = NULL");
+  if ("finish_position" in data) parts.push(data.finish_position != null ? `finish_position = ${data.finish_position}` : "finish_position = NULL");
+  if ("winnings" in data) parts.push(data.winnings != null ? `winnings = ${data.winnings}` : "winnings = NULL");
+  if (data.placed_date != null) parts.push(`placed_date = '${data.placed_date}'`);
+  if ("settled_date" in data) parts.push(data.settled_date != null ? `settled_date = '${data.settled_date}'` : "settled_date = NULL");
+  if ("notes" in data) parts.push(data.notes != null ? `notes = '${esc(data.notes)}'` : "notes = NULL");
+  if (parts.length === 0) return;
+  await conn.query(`UPDATE fantasy_contests SET ${parts.join(", ")} WHERE id = '${id}'`);
+}
+
 export async function deleteFantasyContest(
   conn: AsyncDuckDBConnection,
   id: string
@@ -657,4 +720,174 @@ export async function deleteFantasyLink(
 
 function esc(s: string): string {
   return s.replace(/'/g, "''");
+}
+
+// ── Underdog Bet Log ──────────────────────────────────────────────────────────
+
+export interface UnderdogBet {
+  id: string;
+  account_id: string;
+  entry_date: string;        // YYYY-MM-DD
+  entry_id: string | null;
+  oddsjam_hit: number | null;  // decimal (0.0245 = 2.45%)
+  oddsjam_ev: number | null;
+  ev_amount: number | null;
+  bet_type: string;
+  entry_size: number;
+  legs: number;
+  legs_hit: number | null;
+  legs_pushed: number | null;
+  settled: number | null;    // null = pending
+  tax: number | null;        // tax withheld from payout
+  rescued: boolean;
+  promo: string | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export async function getUnderdogBets(
+  conn: AsyncDuckDBConnection,
+  accountId: string
+): Promise<UnderdogBet[]> {
+  const where = accountId === "ALL" ? "1=1" : `account_id = '${accountId}'`;
+  const result = await conn.query(`
+    SELECT
+      id, account_id,
+      entry_date::VARCHAR   AS entry_date,
+      entry_id,
+      oddsjam_hit::DOUBLE   AS oddsjam_hit,
+      oddsjam_ev::DOUBLE    AS oddsjam_ev,
+      ev_amount::DOUBLE     AS ev_amount,
+      bet_type,
+      entry_size::DOUBLE    AS entry_size,
+      legs::INTEGER         AS legs,
+      legs_hit::INTEGER     AS legs_hit,
+      legs_pushed::INTEGER  AS legs_pushed,
+      settled::DOUBLE       AS settled,
+      tax::DOUBLE           AS tax,
+      rescued,
+      promo,
+      notes,
+      created_at::VARCHAR   AS created_at
+    FROM underdog_bets
+    WHERE ${where}
+    ORDER BY entry_date DESC, created_at DESC
+  `);
+  return result.toArray() as unknown as UnderdogBet[];
+}
+
+export async function insertUnderdogBet(
+  conn: AsyncDuckDBConnection,
+  data: Omit<UnderdogBet, "id" | "created_at">
+): Promise<string> {
+  const id = nanoid();
+  await conn.query(`
+    INSERT INTO underdog_bets (
+      id, account_id, entry_date, entry_id,
+      oddsjam_hit, oddsjam_ev, ev_amount,
+      bet_type, entry_size, legs,
+      legs_hit, legs_pushed, settled, tax,
+      rescued, promo, notes
+    ) VALUES (
+      '${id}',
+      '${data.account_id}',
+      '${data.entry_date}',
+      ${data.entry_id ? `'${esc(data.entry_id)}'` : "NULL"},
+      ${data.oddsjam_hit ?? "NULL"},
+      ${data.oddsjam_ev ?? "NULL"},
+      ${data.ev_amount ?? "NULL"},
+      '${esc(data.bet_type)}',
+      ${data.entry_size},
+      ${data.legs},
+      ${data.legs_hit ?? "NULL"},
+      ${data.legs_pushed ?? "NULL"},
+      ${data.settled ?? "NULL"},
+      ${data.tax ?? "NULL"},
+      ${data.rescued ? "TRUE" : "FALSE"},
+      ${data.promo ? `'${esc(data.promo)}'` : "NULL"},
+      ${data.notes ? `'${esc(data.notes)}'` : "NULL"}
+    )
+  `);
+  return id;
+}
+
+export async function updateUnderdogBet(
+  conn: AsyncDuckDBConnection,
+  id: string,
+  data: Partial<Omit<UnderdogBet, "id" | "account_id" | "created_at">>
+): Promise<void> {
+  const sets: string[] = [];
+  if (data.entry_date !== undefined) sets.push(`entry_date = '${data.entry_date}'`);
+  if ("entry_id" in data) sets.push(`entry_id = ${data.entry_id ? `'${esc(data.entry_id!)}'` : "NULL"}`);
+  if ("oddsjam_hit" in data) sets.push(`oddsjam_hit = ${data.oddsjam_hit ?? "NULL"}`);
+  if ("oddsjam_ev" in data) sets.push(`oddsjam_ev = ${data.oddsjam_ev ?? "NULL"}`);
+  if ("ev_amount" in data) sets.push(`ev_amount = ${data.ev_amount ?? "NULL"}`);
+  if (data.bet_type !== undefined) sets.push(`bet_type = '${esc(data.bet_type)}'`);
+  if (data.entry_size !== undefined) sets.push(`entry_size = ${data.entry_size}`);
+  if (data.legs !== undefined) sets.push(`legs = ${data.legs}`);
+  if ("legs_hit" in data) sets.push(`legs_hit = ${data.legs_hit ?? "NULL"}`);
+  if ("legs_pushed" in data) sets.push(`legs_pushed = ${data.legs_pushed ?? "NULL"}`);
+  if ("settled" in data) sets.push(`settled = ${data.settled ?? "NULL"}`);
+  if ("tax" in data) sets.push(`tax = ${data.tax ?? "NULL"}`);
+  if (data.rescued !== undefined) sets.push(`rescued = ${data.rescued ? "TRUE" : "FALSE"}`);
+  if ("promo" in data) sets.push(`promo = ${data.promo ? `'${esc(data.promo!)}'` : "NULL"}`);
+  if ("notes" in data) sets.push(`notes = ${data.notes ? `'${esc(data.notes!)}'` : "NULL"}`);
+  if (sets.length === 0) return;
+  await conn.query(`UPDATE underdog_bets SET ${sets.join(", ")} WHERE id = '${id}'`);
+}
+
+export async function deleteUnderdogBet(
+  conn: AsyncDuckDBConnection,
+  id: string
+): Promise<void> {
+  await conn.query(`DELETE FROM underdog_bets WHERE id = '${id}'`);
+}
+
+// ── Underdog Monthly Targets ──────────────────────────────────────────────────
+
+export interface UnderdogMonthlyTarget {
+  id: string;
+  account_id: string;
+  month: string;          // YYYY-MM
+  target_spend: number | null;
+  target_pl: number | null;
+  starting_br: number | null;
+  bonuses: number | null;
+}
+
+export async function getUnderdogTargets(
+  conn: AsyncDuckDBConnection,
+  accountId: string
+): Promise<UnderdogMonthlyTarget[]> {
+  const result = await conn.query(`
+    SELECT id, account_id, month::VARCHAR AS month,
+           target_spend::DOUBLE AS target_spend,
+           target_pl::DOUBLE    AS target_pl,
+           starting_br::DOUBLE  AS starting_br,
+           bonuses::DOUBLE      AS bonuses
+    FROM underdog_monthly_targets
+    WHERE account_id = '${accountId}'
+    ORDER BY month ASC
+  `);
+  return result.toArray() as unknown as UnderdogMonthlyTarget[];
+}
+
+export async function upsertUnderdogTarget(
+  conn: AsyncDuckDBConnection,
+  accountId: string,
+  month: string,
+  field: "target_spend" | "target_pl" | "starting_br" | "bonuses",
+  value: number | null
+): Promise<void> {
+  // Ensure row exists
+  const id = nanoid();
+  await conn.query(`
+    INSERT OR IGNORE INTO underdog_monthly_targets (id, account_id, month)
+    VALUES ('${id}', '${accountId}', '${month}')
+  `);
+  await conn.query(`
+    UPDATE underdog_monthly_targets
+    SET ${field} = ${value ?? "NULL"}
+    WHERE account_id = '${accountId}' AND month = '${month}'
+  `);
 }

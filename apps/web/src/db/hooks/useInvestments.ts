@@ -1,17 +1,21 @@
 import { useState, useEffect, useCallback } from "react";
 import { useDb } from "./useDb.js";
-import type { Investment, InvestmentHolding, InvestmentContribution } from "../queries/investments.js";
+import type { Investment, InvestmentHolding, InvestmentContribution, HoldingLot } from "../queries/investments.js";
 import {
   getAllInvestments,
   getAllHoldings,
+  getAllSoldHoldings,
+  getAllLots,
   getContributions,
   insertInvestment,
   updateInvestment,
   deleteInvestment,
   upsertHolding,
   deleteHolding,
+  sellHolding as sellHoldingQuery,
   insertContribution,
   deleteContribution,
+  insertHoldingLot,
   upsertNetWorthSnapshot,
 } from "../queries/investments.js";
 
@@ -19,20 +23,26 @@ export function useInvestments() {
   const { conn } = useDb();
   const [investments, setInvestments] = useState<Investment[]>([]);
   const [holdings, setHoldings] = useState<InvestmentHolding[]>([]);
+  const [soldHoldings, setSoldHoldings] = useState<InvestmentHolding[]>([]);
   const [contributions, setContributions] = useState<InvestmentContribution[]>([]);
+  const [lots, setLots] = useState<HoldingLot[]>([]);
   const [loading, setLoading] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!conn) return;
     setLoading(true);
-    const [invs, holds, contribs] = await Promise.all([
+    const [invs, holds, sold, contribs, allLots] = await Promise.all([
       getAllInvestments(conn),
       getAllHoldings(conn),
+      getAllSoldHoldings(conn),
       getContributions(conn),
+      getAllLots(conn),
     ]);
     setInvestments(invs);
     setHoldings(holds);
+    setSoldHoldings(sold);
     setContributions(contribs);
+    setLots(allLots);
     setLoading(false);
   }, [conn]);
 
@@ -113,16 +123,42 @@ export function useInvestments() {
     [conn, refresh]
   );
 
+  const addHoldingLot = useCallback(
+    async (data: Parameters<typeof insertHoldingLot>[1]) => {
+      if (!conn) return;
+      await insertHoldingLot(conn, data);
+      await upsertNetWorthSnapshot(conn);
+      await refresh();
+    },
+    [conn, refresh]
+  );
+
+  const sellHolding = useCallback(
+    async (id: string) => {
+      if (!conn) return;
+      await sellHoldingQuery(conn, id);
+      await upsertNetWorthSnapshot(conn);
+      await refresh();
+    },
+    [conn, refresh]
+  );
+
+  const lotsByHolding = useCallback(
+    (holdingId: string) => lots.filter((l) => l.holding_id === holdingId),
+    [lots]
+  );
+
   const totalValue = investments.reduce((s, i) => s + i.current_value, 0);
   const totalMonthlyContribution = investments.reduce((s, i) => s + i.monthly_contribution, 0);
   const totalHoldings = holdings.length;
 
   return {
-    investments, holdings, contributions, loading, refresh,
-    holdingsByAccount,
+    investments, holdings, soldHoldings, contributions, lots, loading, refresh,
+    holdingsByAccount, lotsByHolding,
     add, edit, remove,
-    addOrEditHolding, removeHolding,
+    addOrEditHolding, removeHolding, sellHolding,
     addContribution, removeContribution,
+    addHoldingLot,
     totalValue, totalMonthlyContribution, totalHoldings,
   };
 }

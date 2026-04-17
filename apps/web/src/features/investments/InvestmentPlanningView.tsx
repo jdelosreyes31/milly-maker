@@ -26,6 +26,7 @@ interface PlannedHolding {
   ticker: string;
   asset_class: string;
   plannedValue?: number;
+  pricePerShare?: number;
 }
 
 const PLAN_STORAGE_KEY = "investmentPlanAllocations";
@@ -270,13 +271,16 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
   const [newTicker, setNewTicker] = useState("");
   const [newAssetClass, setNewAssetClass] = useState("stocks");
   const [newPlannedValue, setNewPlannedValue] = useState("");
+  const [newPricePerShare, setNewPricePerShare] = useState("");
   const [nameError, setNameError] = useState("");
 
-  // "Analyze with Claude" — portfolio thesis
+  // "Analyze with Claude" — macro news thesis
+  const [newsTagline, setNewsTagline] = useState("");
   const [thesis, setThesis] = useState("");
   const [analyzingThesis, setAnalyzingThesis] = useState(false);
   const [thesisError, setThesisError] = useState<string | null>(null);
   const [thesisPrompt, setThesisPrompt] = useState<PromptPayload | undefined>();
+  const [thesisNews, setThesisNews] = useState(""); // news used for the last run (for display)
   const thesisEndRef = useRef<HTMLDivElement>(null);
 
   // "Invest with Claude" — deployment plan
@@ -447,12 +451,14 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
       ticker: newTicker.trim(),
       asset_class: newAssetClass,
       plannedValue: parseFloat(newPlannedValue) || undefined,
+      pricePerShare: parseFloat(newPricePerShare) || undefined,
     };
     setPlannedHoldings((prev) => [...prev, holding]);
     setNewName("");
     setNewTicker("");
     setNewAssetClass("stocks");
     setNewPlannedValue("");
+    setNewPricePerShare("");
     setNameError("");
     setShowAddForm(false);
   }
@@ -474,18 +480,43 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
     setAnalyzingThesis(true);
     setThesis("");
     setThesisError(null);
+    const news = newsTagline.trim();
+    setThesisNews(news);
 
     try {
       const client = buildClient();
-
       const holdingsTable = buildHoldingsTable();
-
       const notesSection = notes.trim()
-        ? `\n\n**Investor conviction notes — do not argue against these positions; acknowledge them as deliberate and reason around them:**\n${notes.trim()}`
+        ? `\n\n**Investor conviction notes — treat these as deliberate, do not argue against them:**\n${notes.trim()}`
         : "";
 
-      const userMessage =
-        `Here is my current portfolio along with my target allocation. Rows marked [PLANNED] are positions I intend to build but don't yet own.
+      const newsBlock = news
+        ? `**News catalyst:** "${news}"\n\nThis is the macro event or signal you are analyzing the portfolio against. Do not treat it as background color — make it the primary lens for everything that follows.`
+        : "";
+
+      const userMessage = news
+        ? `${newsBlock}
+
+Here is my current portfolio and target allocation. Rows marked [PLANNED] are positions I intend to build but don't yet own.
+
+**Portfolio value:** $${totalValue.toFixed(2)}
+
+| Holding | Asset Class | Current Value | Current % | Target % |
+|---------|-------------|---------------|-----------|----------|
+${holdingsTable}${notesSection}
+
+First, make a judgment call: does this headline actually matter to the economy or markets in a way that would move the needle for a retail growth portfolio? If it is a non-event — local news, procedural update, niche sector noise with no real transmission channel to broader markets — say so directly in 1–2 sentences: explain specifically why it doesn't move the needle (e.g. too localized, no demand/supply shock, already priced in, affects a sector not present in the portfolio). If you can cite the likely primary source or a credible outlet that covers this type of story (Reuters, Bloomberg, WSJ, FT, SEC filings, etc.), name it. Then stop. Do not manufacture significance.
+
+If it does matter, structure your response as:
+
+**1. What this news actually means** — cut through the surface. What is the real macro mechanism at play? Who benefits, who gets hurt, over what timeframe? Be specific about the transmission channels.
+
+**2. How each major position lands** — go holding by holding or cluster by cluster. For each, say explicitly: does this news help it, hurt it, or is it largely irrelevant? Give a magnitude read — is this a 5% tailwind or a structural threat? Don't hedge everything.
+
+**3. Target allocation verdict** — given this news, does the current target allocation make sense, or should the investor be questioning any of the weights? If a target looks wrong in this environment, say so and explain why. If the allocation is fine or even well-positioned, say that too.
+
+**4. The one thing to watch** — if you had to name a single variable or follow-on event that would change your read most dramatically, what is it?`
+        : `Here is my current portfolio along with my target allocation. Rows marked [PLANNED] are positions I intend to build but don't yet own.
 
 **Portfolio value:** $${totalValue.toFixed(2)}
 
@@ -495,10 +526,21 @@ ${holdingsTable}${notesSection}
 
 Read this portfolio as a macro strategist. Don't try to find a single unified thesis — describe the actual mosaic. What distinct economic bets does this collection of positions represent? Where do different clusters point in different directions, and is that a problem or just the natural messiness of a portfolio built with multiple time horizons and conviction levels? What is each major position implicitly saying about the world?
 
-For anything you identify as absent or missing: before calling it out, apply a strict sizing test — a position that would represent less than ~2–3% of this portfolio cannot meaningfully hedge anything or provide real exposure. If a gap passes that test, don't tell me to fill it. Instead, lay out the tradeoff: what exposure I currently have versus what filling the gap would add, what I'd have to give up or dilute to make room for it at meaningful size, and what I stand to gain or lose either way. Let me decide. If the gap cannot be filled at meaningful size without fragmenting the portfolio or diluting conviction positions, say that — and explain what that means for the portfolio's current risk profile.`;
+For anything you identify as absent or missing: before calling it out, apply a strict sizing test — a position that would represent less than ~2–3% of this portfolio cannot meaningfully hedge anything or provide real exposure. If a gap passes that test, don't tell me to fill it. Instead, lay out the tradeoff: what exposure I currently have versus what filling the gap would add, what I'd have to give up or dilute to make room for it at meaningful size, and what I stand to gain or lose either way. Let me decide.`;
 
-      const systemPrompt =
-        `You are a macro strategist and portfolio analyst. The investor is 33 years old and has recently finished building the infrastructure for a growth-based portfolio. They are AI-focused with conviction in large-cap dominance, but seek diversification across the portfolio and intend to carry a small bond ballast as a stabilizer. They understand that contributions will heavily drive portfolio growth until the base reaches roughly $100K — likely 3–4 years out — at which point compounding begins to take over. Until then, contribution discipline matters more than short-term return optimization.
+      const systemPrompt = news
+        ? `You are a macro strategist whose job is to translate a specific news event into portfolio-level implications. You are not here to give balanced views — you are here to take the news seriously and tell the investor what it actually means for the positions they hold and the allocation they are targeting.
+
+The investor is 33, growth-oriented, AI-focused, and in the early compounding phase (~$100K milestone 3–4 years out). Contributions matter more than short-term optimization right now. But they still need to know when news changes the risk/reward profile of a position enough to warrant action or re-weighting.
+
+Rules:
+- Before anything else, assess whether this headline actually moves the needle for a growth portfolio. Many headlines sound significant but have no meaningful transmission channel to the assets this investor holds. If a headline is noise, say so in 1–2 sentences: name specifically why (too localized, no supply/demand shock, already priced in, affects a sector absent from this portfolio, purely procedural, etc.), and cite the type of source that would cover this story (e.g. "Reuters commodities desk", "SEC EDGAR filing", "local municipal record") so the investor knows where to verify. Then stop — do not stretch to find relevance that isn't there.
+- If the headline is genuinely macro-relevant, be opinionated. Do not hedge every statement. If a position looks exposed to this news, say so directly.
+- Distinguish between short-term price noise and structural shifts. A tariff headline might move a stock 3% but not change its 3-year thesis — or it might invalidate the thesis entirely. Know the difference and say which it is.
+- [PLANNED] positions are future intentions — assess whether this news strengthens or weakens the case for building them.
+- Do not recommend specific buy/sell actions. Do frame the risk/reward changes clearly enough that the investor can decide.
+- Be specific. Name what each position is doing. Avoid generic portfolio advice.`
+        : `You are a macro strategist and portfolio analyst. The investor is 33 years old and has recently finished building the infrastructure for a growth-based portfolio. They are AI-focused with conviction in large-cap dominance, but seek diversification across the portfolio and intend to carry a small bond ballast as a stabilizer. They understand that contributions will heavily drive portfolio growth until the base reaches roughly $100K — likely 3–4 years out — at which point compounding begins to take over. Until then, contribution discipline matters more than short-term return optimization.
 
 Your job is to read this portfolio honestly and present what you see — not to make decisions for the investor. Real portfolios are built over time with different conviction levels, different time horizons, and different underlying bets that don't always point the same direction. That is normal. Do not try to force the holdings into a single coherent theme or flag messiness as a problem unless it creates a genuine strategic conflict.
 
@@ -608,6 +650,44 @@ Be specific. Name what each position is doing. Avoid generic portfolio advice. T
 
   // ── "Deploy Capital" — strategy-driven allocation math ──────────────────────
 
+  // Resolve share price for a planned holding: stored price takes priority over live ticker fetch
+  function getSharePrice(holdingId: string, ticker: string): number | undefined {
+    const planned = plannedHoldings.find((p) => p.id === holdingId);
+    if (planned?.pricePerShare) return planned.pricePerShare;
+    if (ticker) return tickerPrices[ticker];
+    return undefined;
+  }
+
+  // Post-process deploy allocations: zero out planned-holding slots where the
+  // dollar amount can't buy even one share, then redistribute freed cash.
+  function enforceShareMinimums(items: DeployAllocation[], totalCash: number): DeployAllocation[] {
+    let freedCash = 0;
+    const adjusted = items.map((r) => {
+      const row = allRows.find((ar) => ar.id === r.id);
+      if (!row?.isPlanned) return r;
+      const sharePrice = getSharePrice(r.id, r.ticker);
+      if (sharePrice != null && r.allocation > 0 && r.allocation < sharePrice) {
+        freedCash += r.allocation;
+        return { ...r, allocation: 0, sharePct: 0, newValue: r.currentValue, tag: "skipped" as const };
+      }
+      return r;
+    });
+
+    if (freedCash <= 0) return adjusted;
+
+    const eligible = adjusted.filter((r) => r.allocation > 0);
+    const totalEligible = eligible.reduce((s, r) => s + r.allocation, 0);
+    if (totalEligible === 0) return adjusted;
+
+    return adjusted.map((r) => {
+      if (r.allocation <= 0) return r;
+      const extra = freedCash * (r.allocation / totalEligible);
+      const newAlloc = r.allocation + extra;
+      const newValue = r.currentValue + newAlloc;
+      return { ...r, allocation: newAlloc, sharePct: (newAlloc / totalCash) * 100, newValue };
+    });
+  }
+
   function computeDeployment(
     cash: number,
     strategy: "balance" | "rebalance" | "growth",
@@ -616,7 +696,7 @@ Be specific. Name what each position is doing. Avoid generic portfolio advice. T
     const newTotal = effectiveTotalValue + cash;
 
     if (strategy === "balance") {
-      return eligible
+      const raw = eligible
         .map(r => {
           const allocation = cash * (r.targetPct / 100);
           const newValue = r.current_value + allocation;
@@ -627,13 +707,13 @@ Be specific. Name what each position is doing. Avoid generic portfolio advice. T
             newValue, newPct: (newValue / newTotal) * 100,
             tag: "target-split" as const,
           };
-        })
-        .sort((a, b) => b.allocation - a.allocation);
+        });
+      return enforceShareMinimums(raw, cash).sort((a, b) => b.allocation - a.allocation);
     }
 
     if (strategy === "rebalance") {
       const gapTotal = eligible.reduce((s, r) => s + Math.max(0, r.delta), 0);
-      return eligible
+      const raw = eligible
         .map(r => {
           const gap = Math.max(0, r.delta);
           const allocation = gapTotal > 0 ? cash * (gap / gapTotal) : 0;
@@ -645,8 +725,8 @@ Be specific. Name what each position is doing. Avoid generic portfolio advice. T
             newValue, newPct: (newValue / newTotal) * 100,
             tag: gap > 0 ? "gap-fill" as const : "skipped" as const,
           };
-        })
-        .sort((a, b) => b.allocation - a.allocation);
+        });
+      return enforceShareMinimums(raw, cash).sort((a, b) => b.allocation - a.allocation);
     }
 
     // Growth: return-weighted with 20% floor reserved for positions >10% below target
@@ -675,7 +755,7 @@ Be specific. Name what each position is doing. Avoid generic portfolio advice. T
       });
     }
 
-    return eligible
+    const growthRaw = eligible
       .map(r => {
         const allocation = allocations[r.id] ?? 0;
         const newValue = r.current_value + allocation;
@@ -688,7 +768,8 @@ Be specific. Name what each position is doing. Avoid generic portfolio advice. T
           newValue, newPct: (newValue / newTotal) * 100,
           tag: (isFloor ? "floor" : isMain ? "return-weighted" : "skipped") as DeployAllocation["tag"],
         };
-      })
+      });
+    return enforceShareMinimums(growthRaw, cash)
       .sort((a, b) => b.allocation - a.allocation);
   }
 
@@ -709,7 +790,7 @@ Be specific. Name what each position is doing. Avoid generic portfolio advice. T
 
       const holdingsList = result.map(r => {
         const isPlanned = allRows.find((ar) => ar.id === r.id)?.isPlanned ?? false;
-        const sharePrice = isPlanned && r.ticker ? tickerPrices[r.ticker] : undefined;
+        const sharePrice = isPlanned ? getSharePrice(r.id, r.ticker) : undefined;
         const priceStr = sharePrice != null ? ` | Share price: $${sharePrice.toFixed(2)}` : "";
         return `- id: "${r.id}" | ${r.ticker || r.name} | ${ASSET_CLASSES.find(a => a.value === r.assetClass)?.label ?? r.assetClass} | Current: ${r.currentPct.toFixed(1)}% | Target: ${r.targetPct.toFixed(1)}% | Computed deploy: $${r.allocation.toFixed(0)} (${r.sharePct.toFixed(1)}% of cash) | Method: ${r.tag}${priceStr}`;
       }).join("\n");
@@ -778,7 +859,7 @@ If a holding has a "Share price" listed, do not suggest an allocation where (sug
       let freedShare = 0;
       for (const r of result) {
         const isPlanned = allRows.find((ar) => ar.id === r.id)?.isPlanned ?? false;
-        const sharePrice = isPlanned && r.ticker ? tickerPrices[r.ticker] : undefined;
+        const sharePrice = isPlanned ? getSharePrice(r.id, r.ticker) : undefined;
         const cal = newCalibration[r.id];
         if (sharePrice != null && cal && cash * cal.suggestedShare < sharePrice) {
           freedShare += cal.suggestedShare;
@@ -1481,12 +1562,25 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
                     onKeyDown={(e) => { if (e.key === "Enter") handleAddPlanned(); }}
                   />
                 </div>
+                <div className="w-28">
+                  <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Price/share ($)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newPricePerShare}
+                    onChange={(e) => setNewPricePerShare(e.target.value)}
+                    placeholder="e.g. 450.00"
+                    className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2 py-1 text-sm focus:border-[var(--color-primary)] focus:outline-none"
+                    onKeyDown={(e) => { if (e.key === "Enter") handleAddPlanned(); }}
+                  />
+                </div>
                 <div className="flex gap-1.5">
                   <Button size="sm" onClick={handleAddPlanned}>Add</Button>
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => { setShowAddForm(false); setNewName(""); setNewTicker(""); setNewPlannedValue(""); setNameError(""); }}
+                    onClick={() => { setShowAddForm(false); setNewName(""); setNewTicker(""); setNewPlannedValue(""); setNewPricePerShare(""); setNameError(""); }}
                   >
                     Cancel
                   </Button>
@@ -1527,7 +1621,19 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
         </div>
       ) : (
         <div className="flex flex-col gap-4">
-          <div className="flex flex-wrap items-center gap-2">
+          {/* ── News input ── */}
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Globe2 size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-subtle)] pointer-events-none" />
+              <input
+                type="text"
+                value={newsTagline}
+                onChange={e => setNewsTagline(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && !analyzingThesis && allRows.length > 0) void handlePortfolioThesis(); }}
+                placeholder="Paste a news headline to analyze your positions against it — or leave blank for a general thesis"
+                className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] pl-7 pr-3 py-2 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-subtle)] focus:border-[var(--color-primary)] focus:outline-none"
+              />
+            </div>
             <Button
               size="sm"
               variant="outline"
@@ -1535,8 +1641,10 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
               disabled={analyzingThesis || allRows.length === 0}
             >
               <TrendingUp size={14} />
-              {analyzingThesis ? "Analyzing…" : "Analyze with Claude"}
+              {analyzingThesis ? "Analyzing…" : "Analyze"}
             </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
               onClick={handleInvestPlan}
@@ -1770,7 +1878,7 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
 
           <StreamingCard
             icon={<TrendingUp size={14} className="text-[var(--color-primary)]" />}
-            title="Portfolio Thesis"
+            title={thesisNews ? `Macro Read — "${thesisNews}"` : "Portfolio Thesis"}
             content={thesis}
             streaming={analyzingThesis}
             error={thesisError}

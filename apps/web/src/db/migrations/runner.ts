@@ -13,6 +13,11 @@ import schema011 from "./011_fantasy_contests.sql?raw";
 import schema012 from "./012_fantasy_bet_sessions.sql?raw";
 import schema013 from "./013_link_fantasy_tx.sql?raw";
 import schema014 from "./014_bet_session_open.sql?raw";
+import schema015 from "./015_holding_lots.sql?raw";
+import schema016 from "./016_holding_sold.sql?raw";
+import schema017 from "./017_underdog_bets.sql?raw";
+import schema018 from "./018_underdog_monthly.sql?raw";
+import schema019 from "./019_underdog_tax.sql?raw";
 
 const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "001_initial_schema", sql: schema001 },
@@ -29,6 +34,11 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "012_fantasy_bet_sessions", sql: schema012 },
   { name: "013_link_fantasy_tx", sql: schema013 },
   { name: "014_bet_session_open", sql: schema014 },
+  { name: "015_holding_lots", sql: schema015 },
+  { name: "016_holding_sold", sql: schema016 },
+  { name: "017_underdog_bets", sql: schema017 },
+  { name: "018_underdog_monthly", sql: schema018 },
+  { name: "019_underdog_tax", sql: schema019 },
 ];
 
 export async function runMigrations(conn: AsyncDuckDBConnection): Promise<void> {
