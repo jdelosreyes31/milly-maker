@@ -395,6 +395,7 @@ export interface HoldingLot {
   price_per_share: number;
   purchased_at: string;
   notes: string | null;
+  transaction_type: "buy" | "sell";
 }
 
 export async function getLotsForHolding(
@@ -406,7 +407,8 @@ export async function getLotsForHolding(
            shares::DOUBLE          AS shares,
            price_per_share::DOUBLE AS price_per_share,
            purchased_at::VARCHAR   AS purchased_at,
-           notes
+           notes,
+           COALESCE(transaction_type, 'buy') AS transaction_type
     FROM holding_lots
     WHERE holding_id = '${holdingId}'
     ORDER BY purchased_at DESC, created_at DESC
@@ -422,7 +424,8 @@ export async function getAllLots(
            shares::DOUBLE          AS shares,
            price_per_share::DOUBLE AS price_per_share,
            purchased_at::VARCHAR   AS purchased_at,
-           notes
+           notes,
+           COALESCE(transaction_type, 'buy') AS transaction_type
     FROM holding_lots
     ORDER BY purchased_at DESC, created_at DESC
   `);
@@ -438,25 +441,28 @@ export async function insertHoldingLot(
     price_per_share: number;
     purchased_at: string;
     notes: string | null;
+    transaction_type?: "buy" | "sell";
   }
 ): Promise<void> {
   const id = nanoid();
   const notes = data.notes ? `'${esc(data.notes)}'` : "NULL";
+  const txType = data.transaction_type ?? "buy";
   await conn.query(`
-    INSERT INTO holding_lots (id, holding_id, shares, price_per_share, purchased_at, notes)
+    INSERT INTO holding_lots (id, holding_id, shares, price_per_share, purchased_at, notes, transaction_type)
     VALUES ('${id}', '${data.holding_id}', ${data.shares}, ${data.price_per_share},
-            '${data.purchased_at}', ${notes})
+            '${data.purchased_at}', ${notes}, '${txType}')
   `);
-  // Accumulate shares + cost onto the holding
-  const lotCost = data.shares * data.price_per_share;
-  await conn.query(`
-    UPDATE investment_holdings SET
-      shares     = COALESCE(shares, 0) + ${data.shares},
-      cost_basis = COALESCE(cost_basis, 0) + ${lotCost},
-      updated_at = now()
-    WHERE id = '${data.holding_id}'
-  `);
-  await syncHoldingsTotals(conn, data.investment_id);
+  if (txType === "buy") {
+    const lotCost = data.shares * data.price_per_share;
+    await conn.query(`
+      UPDATE investment_holdings SET
+        shares     = COALESCE(shares, 0) + ${data.shares},
+        cost_basis = COALESCE(cost_basis, 0) + ${lotCost},
+        updated_at = now()
+      WHERE id = '${data.holding_id}'
+    `);
+    await syncHoldingsTotals(conn, data.investment_id);
+  }
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

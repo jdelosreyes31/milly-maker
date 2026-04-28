@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { Plus, Trash2, Pencil, TrendingUp, ChevronDown, ChevronRight, Landmark, ShoppingCart, TrendingDown, RefreshCw } from "lucide-react";
+import { Plus, Trash2, Pencil, TrendingUp, ChevronDown, ChevronRight, Landmark, RefreshCw, ArrowLeftRight } from "lucide-react";
 import {
   Button, Card, CardContent, CardHeader, CardTitle,
   Dialog, Input, Select, StatCard, Badge, formatCurrency, formatPercent,
@@ -136,10 +136,26 @@ export function InvestmentsPage() {
   const [lotErrors, setLotErrors] = useState<Partial<Record<keyof LotForm, string>>>({});
 
   const [saving, setSaving] = useState(false);
-  const [priceEdits, setPriceEdits] = useState<Record<string, string>>({});
   const [fetchingPrice, setFetchingPrice] = useState<Set<string>>(new Set());
   const [fetchPriceDialog, setFetchPriceDialog] = useState(false);
   const [fetchResults, setFetchResults] = useState<Record<string, { status: "pending" | "done" | "error"; price: number | null }>>({});
+
+  type TxType = "buy" | "sell_amount" | "sell_shares" | "sell_all";
+  type TxHolding = ReturnType<typeof holdingsByAccount>[number];
+  const [txDialog, setTxDialog] = useState(false);
+  const [txHolding, setTxHolding] = useState<TxHolding | null>(null);
+  const [txType, setTxType] = useState<TxType>("buy");
+  const [txAmount, setTxAmount] = useState("");
+  const [txShares, setTxShares] = useState("");
+  const [txError, setTxError] = useState("");
+  const [txIsNew, setTxIsNew] = useState(false);
+  const [txNewName, setTxNewName] = useState("");
+  const [txNewTicker, setTxNewTicker] = useState("");
+  const [txNewAssetClass, setTxNewAssetClass] = useState("stocks");
+  const [txNewInvestmentId, setTxNewInvestmentId] = useState("");
+  const [txNewShares, setTxNewShares] = useState("");
+  const [txNewPrice, setTxNewPrice] = useState("");
+  const [txPrice, setTxPrice] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showAllContribs, setShowAllContribs] = useState(false);
   const [view, setView] = useState<"overview" | "planning" | "forecast" | "actual" | "coast">("overview");
@@ -278,7 +294,125 @@ export function InvestmentsPage() {
     setSaving(false); setLotDialog(false);
   }
 
-  // ── Inline price edit ────────────────────────────────────────────────────
+  // ── Log Transaction dialog ───────────────────────────────────────────────
+  function openTxDialog(h: TxHolding) {
+    setTxHolding(h); setTxType("buy"); setTxAmount(""); setTxShares(""); setTxError("");
+    setTxIsNew(false); setTxNewName(""); setTxNewTicker(""); setTxNewAssetClass("stocks");
+    setTxNewInvestmentId(investments[0]?.id ?? ""); setTxNewShares(""); setTxNewPrice(""); setTxPrice("");
+    setTxDialog(true);
+  }
+
+  async function handleLogTransaction() {
+    if (txIsNew) {
+      const shares = Number(txNewShares);
+      const price = Number(txNewPrice);
+      if (!txNewName.trim()) { setTxError("Enter a holding name"); return; }
+      if (!shares || shares <= 0) { setTxError("Enter number of shares"); return; }
+      if (!price || price <= 0) { setTxError("Enter price per share"); return; }
+      if (!txNewInvestmentId) { setTxError("Select an account"); return; }
+      const value = parseFloat((shares * price).toFixed(2));
+      setSaving(true);
+      // addOrEditHolding generates the holding ID internally; we use the existing buy lot path
+      // by passing shares to addOrEditHolding which will accumulate via insertHoldingLot below
+      const newHoldingId = (await import("@/lib/nanoid.js")).nanoid();
+      // Create holding with 0 shares/cost — addHoldingLot will accumulate the correct values
+      await addOrEditHolding({
+        id: newHoldingId,
+        investment_id: txNewInvestmentId,
+        name: txNewName.trim(),
+        ticker: txNewTicker.trim().toUpperCase() || null,
+        shares: 0,
+        current_value: 0,
+        cost_basis: 0,
+        asset_class: txNewAssetClass,
+      });
+      await addHoldingLot({ holding_id: newHoldingId, investment_id: txNewInvestmentId, shares: parseFloat(shares.toFixed(6)), price_per_share: price, purchased_at: new Date().toISOString().slice(0, 10), notes: null, transaction_type: "buy" });
+      setSaving(false); setTxDialog(false);
+      return;
+    }
+    if (!txHolding) return;
+    const h = txHolding;
+    const pricePerShare = h.shares && h.shares > 0 ? h.current_value / h.shares : 0;
+    setTxError("");
+
+    if (txType === "buy") {
+      const amount = Number(txAmount);
+      if (!amount || amount <= 0) { setTxError("Enter a dollar amount"); return; }
+      const newShares = pricePerShare > 0 ? amount / pricePerShare : null;
+      setSaving(true);
+      await addOrEditHolding({
+        id: h.id, investment_id: h.investment_id, name: h.name, ticker: h.ticker,
+        shares: newShares != null ? parseFloat(((h.shares ?? 0) + newShares).toFixed(6)) : h.shares,
+        current_value: parseFloat((h.current_value + amount).toFixed(2)),
+        cost_basis: parseFloat((h.cost_basis + amount).toFixed(2)),
+        asset_class: h.asset_class,
+      });
+      if (newShares != null) {
+        await addHoldingLot({
+          holding_id: h.id, investment_id: h.investment_id,
+          shares: parseFloat(newShares.toFixed(6)),
+          price_per_share: pricePerShare,
+          purchased_at: new Date().toISOString().slice(0, 10),
+          notes: null,
+        });
+      }
+
+    } else if (txType === "sell_amount") {
+      const amount = Number(txAmount);
+      const sellPrice = txPrice ? Number(txPrice) : pricePerShare;
+      if (!amount || amount <= 0) { setTxError("Enter a dollar amount"); return; }
+      if (!sellPrice || sellPrice <= 0) { setTxError("Enter current price per share"); return; }
+      const sharesSold = parseFloat((amount / sellPrice).toFixed(6));
+      if (h.shares != null && sharesSold > h.shares) { setTxError("Amount exceeds holdings at this price"); return; }
+      const remainingShares = h.shares != null ? parseFloat((h.shares - sharesSold).toFixed(6)) : null;
+      const remainingValue = remainingShares != null ? parseFloat((remainingShares * sellPrice).toFixed(2)) : 0;
+      const oldAccountValue = investments.find((i) => i.id === h.investment_id)?.current_value ?? 0;
+      setSaving(true);
+      await addOrEditHolding({
+        id: h.id, investment_id: h.investment_id, name: h.name, ticker: h.ticker,
+        shares: remainingShares, current_value: remainingValue,
+        cost_basis: h.cost_basis, asset_class: h.asset_class,
+      });
+      await addHoldingLot({ holding_id: h.id, investment_id: h.investment_id, shares: sharesSold, price_per_share: sellPrice, purchased_at: new Date().toISOString().slice(0, 10), notes: null, transaction_type: "sell" });
+      // Credit proceeds back: account = (old - old_holding + remaining_holding) + proceeds
+      await edit(h.investment_id, { current_value: parseFloat((oldAccountValue - h.current_value + remainingValue + amount).toFixed(2)) });
+
+    } else if (txType === "sell_shares") {
+      const shares = Number(txShares);
+      const sellPrice = txPrice ? Number(txPrice) : pricePerShare;
+      if (!shares || shares <= 0) { setTxError("Enter share count"); return; }
+      if (h.shares == null || shares > h.shares) { setTxError("Not enough shares"); return; }
+      if (!sellPrice || sellPrice <= 0) { setTxError("Enter current price per share"); return; }
+      const proceeds = parseFloat((shares * sellPrice).toFixed(2));
+      const remainingShares = parseFloat((h.shares - shares).toFixed(6));
+      const remainingValue = parseFloat((remainingShares * sellPrice).toFixed(2));
+      const oldAccountValue = investments.find((i) => i.id === h.investment_id)?.current_value ?? 0;
+      setSaving(true);
+      await addOrEditHolding({
+        id: h.id, investment_id: h.investment_id, name: h.name, ticker: h.ticker,
+        shares: remainingShares, current_value: remainingValue,
+        cost_basis: h.cost_basis, asset_class: h.asset_class,
+      });
+      await addHoldingLot({ holding_id: h.id, investment_id: h.investment_id, shares, price_per_share: sellPrice, purchased_at: new Date().toISOString().slice(0, 10), notes: null, transaction_type: "sell" });
+      // Credit proceeds back: account = (old - old_holding + remaining_holding) + proceeds
+      await edit(h.investment_id, { current_value: parseFloat((oldAccountValue - h.current_value + remainingValue + proceeds).toFixed(2)) });
+
+    } else if (txType === "sell_all") {
+      const sellPrice = txPrice ? Number(txPrice) : pricePerShare;
+      if (!sellPrice || sellPrice <= 0) { setTxError("Enter current price per share"); return; }
+      const proceeds = parseFloat(((h.shares ?? 0) * sellPrice).toFixed(2));
+      const oldAccountValue = investments.find((i) => i.id === h.investment_id)?.current_value ?? 0;
+      setSaving(true);
+      await addHoldingLot({ holding_id: h.id, investment_id: h.investment_id, shares: h.shares ?? 0, price_per_share: sellPrice, purchased_at: new Date().toISOString().slice(0, 10), notes: "Sell all", transaction_type: "sell" });
+      await sellHolding(h.id);
+      // sellHolding removes holding from account total — add proceeds back
+      await edit(h.investment_id, { current_value: parseFloat((oldAccountValue - h.current_value + proceeds).toFixed(2)) });
+    }
+
+    setSaving(false); setTxDialog(false);
+  }
+
+  // ── Inline price save (used by fetch prices) ─────────────────────────────
   async function handlePriceSave(h: ReturnType<typeof holdingsByAccount>[number], priceStr: string) {
     if (!h.shares || h.shares <= 0 || !priceStr) return;
     const price = Number(priceStr);
@@ -291,7 +425,6 @@ export function InvestmentsPage() {
       shares: h.shares, current_value: newCurrentValue,
       cost_basis: h.cost_basis, asset_class: h.asset_class,
     });
-    setPriceEdits((prev) => { const next = { ...prev }; delete next[h.id]; return next; });
   }
 
   function openFetchPriceDialog() {
@@ -362,6 +495,9 @@ export function InvestmentsPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Investments</h1>
         <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => { setTxHolding(null); setTxType("buy"); setTxAmount(""); setTxShares(""); setTxError(""); setTxIsNew(false); setTxNewName(""); setTxNewTicker(""); setTxNewAssetClass("stocks"); setTxNewInvestmentId(investments[0]?.id ?? ""); setTxNewShares(""); setTxNewPrice(""); setTxDialog(true); }}>
+            <ArrowLeftRight size={14} /> Log Transaction
+          </Button>
           <Button variant="outline" size="sm" onClick={openFetchPriceDialog}>
             <RefreshCw size={14} /> Fetch Prices
           </Button>
@@ -558,19 +694,9 @@ export function InvestmentsPage() {
                                   <td className="py-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
                                     <p>{h.shares != null ? h.shares.toLocaleString(undefined, { maximumFractionDigits: 6 }) : "—"}</p>
                                     {h.shares != null && h.shares > 0 && (
-                                      <div className="flex items-center justify-end gap-0.5 mt-0.5">
-                                        <span className="text-[10px] text-[var(--color-text-subtle)]">@ $</span>
-                                        <input
-                                          type="number"
-                                          min="0"
-                                          step="0.0001"
-                                          className="w-16 text-right text-[10px] bg-transparent border-b border-transparent hover:border-[var(--color-border)] focus:border-[var(--color-primary)] focus:outline-none tabular-nums text-[var(--color-text-muted)]"
-                                          value={priceEdits[h.id] ?? String(parseFloat((h.current_value / h.shares).toFixed(4)))}
-                                          onChange={(e) => setPriceEdits((prev) => ({ ...prev, [h.id]: e.target.value }))}
-                                          onBlur={(e) => void handlePriceSave(h, e.target.value)}
-                                          onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-                                        />
-                                      </div>
+                                      <p className="text-[10px] text-[var(--color-text-subtle)] mt-0.5">
+                                        @ ${(h.current_value / h.shares).toFixed(4)}
+                                      </p>
                                     )}
                                   </td>
                                   <td className="py-2 text-right tabular-nums font-medium">
@@ -583,30 +709,6 @@ export function InvestmentsPage() {
                                   </td>
                                   <td className="py-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
                                     {h.cost_basis > 0 ? formatCurrency(h.cost_basis) : "—"}
-                                  </td>
-                                  <td className="py-2 pr-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <div className="flex gap-1 justify-end">
-                                      <button
-                                        onClick={() => openAddLot(h.id, h.name, h.investment_id)}
-                                        className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-primary)]"
-                                        title="Log buy"
-                                      >
-                                        <ShoppingCart size={12} />
-                                      </button>
-                                      <button
-                                        onClick={() => void sellHolding(h.id)}
-                                        className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[#f79009]"
-                                        title="Sell — removes from dashboard, keeps account value"
-                                      >
-                                        <TrendingDown size={12} />
-                                      </button>
-                                      <button onClick={() => openEditHolding(h)} className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-text)]">
-                                        <Pencil size={12} />
-                                      </button>
-                                      <button onClick={() => removeHolding(h.id, h.investment_id)} className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]">
-                                        <Trash2 size={12} />
-                                      </button>
-                                    </div>
                                   </td>
                                 </tr>
                               );
@@ -632,14 +734,6 @@ export function InvestmentsPage() {
                           No holdings tracked yet.
                         </p>
                       )}
-                      <div className="px-4 py-2 border-t border-[var(--color-border-subtle)]">
-                        <button
-                          onClick={() => openAddHolding(inv.id)}
-                          className="text-xs text-[var(--color-primary)] hover:underline flex items-center gap-1"
-                        >
-                          <Plus size={11} /> Add holding
-                        </button>
-                      </div>
                     </div>
                   )}
                 </Card>
@@ -995,6 +1089,145 @@ export function InvestmentsPage() {
           </div>
         </div>
       </Dialog>
+      {/* ── Log Transaction Dialog ── */}
+      <Dialog open={txDialog} onClose={() => setTxDialog(false)} title="Log Transaction">
+        {txDialog && (
+          <div className="flex flex-col gap-4">
+            <Select
+              label="Holding"
+              placeholder="Select a holding…"
+              options={[
+                { value: "__new__", label: "+ New holding" },
+                ...holdings.filter((h) => !h.is_sold).map((h) => ({ value: h.id, label: h.ticker ? `${h.ticker} — ${h.name}` : h.name })),
+              ]}
+              value={txIsNew ? "__new__" : (txHolding?.id ?? "")}
+              onChange={(e) => {
+                if (e.target.value === "__new__") {
+                  setTxIsNew(true); setTxHolding(null); setTxType("buy"); setTxAmount(""); setTxError("");
+                } else {
+                  setTxIsNew(false);
+                  const h = holdings.find((x) => x.id === e.target.value) ?? null;
+                  setTxHolding(h as TxHolding | null);
+                  setTxAmount(""); setTxShares(""); setTxError("");
+                }
+              }}
+            />
+
+            {txIsNew && (
+              <div className="flex flex-col gap-3">
+                <Select
+                  label="Account"
+                  options={investments.map((i) => ({ value: i.id, label: i.name }))}
+                  value={txNewInvestmentId}
+                  onChange={(e) => setTxNewInvestmentId(e.target.value)}
+                />
+                <div className="grid grid-cols-2 gap-3">
+                  <Input label="Name" placeholder="e.g. Vanguard S&P 500 ETF" value={txNewName} onChange={(e) => setTxNewName(e.target.value)} />
+                  <Input label="Ticker (optional)" placeholder="e.g. VOO" value={txNewTicker} onChange={(e) => setTxNewTicker(e.target.value)} />
+                </div>
+                <Select label="Asset Class" options={ASSET_CLASSES} value={txNewAssetClass} onChange={(e) => setTxNewAssetClass(e.target.value)} />
+                <div className="grid grid-cols-2 gap-3">
+                  <Input label="Shares" type="number" min="0" step="0.000001" placeholder="e.g. 10.5" value={txNewShares} onChange={(e) => setTxNewShares(e.target.value)} />
+                  <Input label="Price per Share ($)" type="number" min="0" step="0.0001" placeholder="e.g. 95.42" value={txNewPrice} onChange={(e) => setTxNewPrice(e.target.value)} />
+                </div>
+                {txNewShares && txNewPrice && (
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    Total value: <span className="font-medium text-[var(--color-text)]">{formatCurrency(Number(txNewShares) * Number(txNewPrice))}</span>
+                  </p>
+                )}
+                {txError && <p className="text-xs text-[var(--color-danger)]">{txError}</p>}
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button variant="outline" size="sm" onClick={() => setTxDialog(false)}>Cancel</Button>
+                  <Button size="sm" onClick={() => void handleLogTransaction()} disabled={saving}>{saving ? "Saving…" : "Add Holding"}</Button>
+                </div>
+              </div>
+            )}
+
+            {!txIsNew && txHolding && (<>
+            <div className="text-xs text-[var(--color-text-muted)]">
+              {txHolding.shares != null && txHolding.shares > 0
+                ? `${txHolding.shares.toLocaleString(undefined, { maximumFractionDigits: 6 })} shares · $${(txHolding.current_value / txHolding.shares).toFixed(4)}/sh · ${formatCurrency(txHolding.current_value)} value`
+                : `${formatCurrency(txHolding.current_value)} value`}
+            </div>
+
+            {/* Transaction type tabs */}
+            <div className="grid grid-cols-4 gap-1 text-xs">
+              {(["buy", "sell_amount", "sell_shares", "sell_all"] as TxType[]).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => { setTxType(t); setTxAmount(""); setTxShares(""); setTxPrice(""); setTxError(""); }}
+                  className={`rounded px-2 py-1.5 font-medium transition-colors ${txType === t ? "bg-[var(--color-primary)] text-white" : "bg-[var(--color-surface-raised)] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}
+                >
+                  {t === "buy" ? "Buy" : t === "sell_amount" ? "Sell $" : t === "sell_shares" ? "Sell Shares" : "Sell All"}
+                </button>
+              ))}
+            </div>
+
+            {txType === "buy" && (
+              <Input label="Dollar Amount ($)" type="number" min="0" step="0.01" placeholder="e.g. 500"
+                value={txAmount} onChange={(e) => setTxAmount(e.target.value)} />
+            )}
+            {txType === "sell_amount" && (
+              <div className="flex flex-col gap-3">
+                <Input label="Current Price per Share ($)" type="number" min="0" step="0.0001"
+                  placeholder={txHolding.shares && txHolding.shares > 0 ? (txHolding.current_value / txHolding.shares).toFixed(4) : "0.00"}
+                  value={txPrice} onChange={(e) => setTxPrice(e.target.value)} />
+                <Input label="Dollar Amount to Sell ($)" type="number" min="0" step="0.01" placeholder="e.g. 500"
+                  value={txAmount} onChange={(e) => setTxAmount(e.target.value)} />
+              </div>
+            )}
+            {txType === "sell_shares" && (
+              <div className="flex flex-col gap-3">
+                <Input label="Current Price per Share ($)" type="number" min="0" step="0.0001"
+                  placeholder={txHolding.shares && txHolding.shares > 0 ? (txHolding.current_value / txHolding.shares).toFixed(4) : "0.00"}
+                  value={txPrice} onChange={(e) => setTxPrice(e.target.value)} />
+                <Input label="Number of Shares to Sell" type="number" min="0" step="0.000001"
+                  placeholder={txHolding.shares != null ? `max ${txHolding.shares.toLocaleString(undefined, { maximumFractionDigits: 6 })}` : "shares"}
+                  value={txShares} onChange={(e) => setTxShares(e.target.value)} />
+              </div>
+            )}
+            {txType === "sell_all" && (
+              <div className="flex flex-col gap-3">
+                <Input label="Current Price per Share ($)" type="number" min="0" step="0.0001"
+                  placeholder={txHolding.shares && txHolding.shares > 0 ? (txHolding.current_value / txHolding.shares).toFixed(4) : "0.00"}
+                  value={txPrice} onChange={(e) => setTxPrice(e.target.value)} />
+                {txPrice && txHolding.shares && (
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    Proceeds: <span className="font-medium text-[var(--color-text)]">{formatCurrency(Number(txPrice) * txHolding.shares)}</span>
+                  </p>
+                )}
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  Removes holding from dashboard. Proceeds are credited back to the account.
+                </p>
+              </div>
+            )}
+
+            {txError && <p className="text-xs text-[var(--color-danger)]">{txError}</p>}
+
+            <div className="flex items-center justify-between pt-1">
+              <button
+                onClick={() => { if (confirm(`Remove ${txHolding.name} from your holdings?`)) { void removeHolding(txHolding.id, txHolding.investment_id); setTxDialog(false); } }}
+                className="text-xs text-[var(--color-danger)] hover:underline flex items-center gap-1"
+              >
+                <Trash2 size={11} /> Remove holding
+              </button>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => setTxDialog(false)}>Cancel</Button>
+                <Button size="sm" onClick={() => void handleLogTransaction()} disabled={saving}>
+                  {saving ? "Saving…" : txType === "sell_all" ? "Confirm Sell All" : "Log Transaction"}
+                </Button>
+              </div>
+            </div>
+            </>)}
+            {!txIsNew && !txHolding && (
+              <div className="flex justify-end">
+                <Button variant="outline" size="sm" onClick={() => setTxDialog(false)}>Cancel</Button>
+              </div>
+            )}
+          </div>
+        )}
+      </Dialog>
+
       {/* ── Fetch Prices Dialog ── */}
       <Dialog open={fetchPriceDialog} onClose={() => setFetchPriceDialog(false)} title="Fetch Prev-Day Prices">
         <div className="flex flex-col gap-4">

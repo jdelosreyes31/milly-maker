@@ -603,19 +603,20 @@ export function InvestmentActualView({ holdings, soldHoldings, investments, lots
         </Card>
       )}
 
-      {/* ── Purchase log ── */}
+      {/* ── Transaction log ── */}
       {lots.length > 0 && (
         <Card>
-          <CardHeader><CardTitle>Purchase Log</CardTitle></CardHeader>
+          <CardHeader><CardTitle>Transaction Log</CardTitle></CardHeader>
           <CardContent>
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[var(--color-border)] text-xs text-[var(--color-text-muted)] text-left">
                   <th className="pb-2">Date</th>
                   <th className="pb-2">Holding</th>
+                  <th className="pb-2 text-right">Type</th>
                   <th className="pb-2 text-right">Shares</th>
                   <th className="pb-2 text-right">Price / sh</th>
-                  <th className="pb-2 text-right">Total Cost</th>
+                  <th className="pb-2 text-right">Total</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-border-subtle)]">
@@ -623,6 +624,7 @@ export function InvestmentActualView({ holdings, soldHoldings, investments, lots
                   .sort((a, b) => b.purchased_at.localeCompare(a.purchased_at))
                   .map(lot => {
                     const holding = holdings.find(h => h.id === lot.holding_id);
+                    const isSell = lot.transaction_type === "sell";
                     return (
                       <tr key={lot.id}>
                         <td className="py-2 tabular-nums text-[var(--color-text-muted)]">
@@ -632,14 +634,19 @@ export function InvestmentActualView({ holdings, soldHoldings, investments, lots
                           <p className="font-medium">{holding?.name ?? "—"}</p>
                           {holding?.ticker && <p className="text-xs font-mono text-[var(--color-text-muted)]">{holding.ticker}</p>}
                         </td>
+                        <td className="py-2 text-right">
+                          <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${isSell ? "bg-[var(--color-danger)]/10 text-[var(--color-danger)]" : "bg-[var(--color-success)]/10 text-[var(--color-success)]"}`}>
+                            {isSell ? "Sell" : "Buy"}
+                          </span>
+                        </td>
                         <td className="py-2 text-right tabular-nums">
                           {lot.shares.toLocaleString(undefined, { maximumFractionDigits: 6 })}
                         </td>
                         <td className="py-2 text-right tabular-nums text-[var(--color-text-muted)]">
                           {formatCurrency(lot.price_per_share)}
                         </td>
-                        <td className="py-2 text-right tabular-nums font-semibold">
-                          {formatCurrency(lot.shares * lot.price_per_share)}
+                        <td className={`py-2 text-right tabular-nums font-semibold ${isSell ? "text-[var(--color-success)]" : ""}`}>
+                          {isSell ? "+" : ""}{formatCurrency(lot.shares * lot.price_per_share)}
                         </td>
                       </tr>
                     );
