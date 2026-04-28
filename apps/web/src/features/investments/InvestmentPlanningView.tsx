@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Bot, AlertTriangle, Plus, Trash2, TrendingUp, Wallet, Users, BarChart3, Globe2, Zap, Download } from "lucide-react";
 import Anthropic from "@anthropic-ai/sdk";
 import ReactMarkdown from "react-markdown";
@@ -79,6 +79,11 @@ const ASSET_CLASS_RETURNS: Record<string, number> = {
   cash:                 0.025,
   other:                0.07,
 };
+
+// Below this dollar amount, splitting across multiple positions likely isn't worth it.
+const SINGLE_DUMP_THRESHOLD = 500;
+// Minimum meaningful allocation per position ($); below this, the split is too thin.
+const MIN_PER_POSITION = 50;
 
 // ── Deploy allocation result ──────────────────────────────────────────────────
 
@@ -299,6 +304,7 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
   const [calibratingDeploy, setCalibratingDeploy] = useState(false);
   const [deployCalibrationError, setDeployCalibrationError] = useState<string | null>(null);
   const [tickerPrices, setTickerPrices] = useState<Record<string, number>>({});
+  const [deployNotes, setDeployNotes] = useState("");
 
   // "Council" — financial analyst + macro strategist + action summary
   const [analystOutput, setAnalystOutput] = useState("");
@@ -352,6 +358,17 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
     ...holdings.map((h) => ({ ...h, isPlanned: false as const })),
     ...plannedHoldings.map((p) => ({ ...p, current_value: p.plannedValue ?? 0, isPlanned: true as const })),
   ];
+
+  const detectedHoldings = useMemo(() => {
+    const news = newsTagline.trim();
+    if (!news) return [];
+    return allRows.filter((r) => {
+      if (r.ticker && new RegExp(`\\b${r.ticker}\\b`, "i").test(news)) return true;
+      const firstName = r.name.split(/[\s,.(]/)[0];
+      if (firstName.length >= 4 && new RegExp(`\\b${firstName}\\b`, "i").test(news)) return true;
+      return false;
+    });
+  }, [newsTagline, allRows]);
 
   // Fetch last-known share prices for planned holdings when deploy result or rows change
   useEffect(() => {
@@ -490,12 +507,55 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
         ? `\n\n**Investor conviction notes — treat these as deliberate, do not argue against them:**\n${notes.trim()}`
         : "";
 
+      // Detect portfolio holdings mentioned in the news text
+      const mentionedHoldings = news ? allRows.filter((r) => {
+        if (r.ticker) {
+          // Match ticker as a whole word (case-insensitive, but tickers are usually uppercase)
+          const tickerRegex = new RegExp(`\\b${r.ticker}\\b`, "i");
+          if (tickerRegex.test(news)) return true;
+        }
+        // Match company name (first significant word, at least 4 chars to avoid noise)
+        const firstName = r.name.split(/[\s,.(]/)[0];
+        if (firstName.length >= 4) {
+          const nameRegex = new RegExp(`\\b${firstName}\\b`, "i");
+          if (nameRegex.test(news)) return true;
+        }
+        return false;
+      }) : [];
+      const isFocused = mentionedHoldings.length > 0 && mentionedHoldings.length <= 3;
+
       const newsBlock = news
         ? `**News catalyst:** "${news}"\n\nThis is the macro event or signal you are analyzing the portfolio against. Do not treat it as background color — make it the primary lens for everything that follows.`
         : "";
 
+      const focusedHoldingsList = isFocused
+        ? mentionedHoldings.map((h) => `${h.name}${h.ticker ? ` (${h.ticker})` : ""}`).join(", ")
+        : "";
+
       const userMessage = news
-        ? `${newsBlock}
+        ? isFocused
+          ? `${newsBlock}
+
+This news appears to be directly relevant to the following position${mentionedHoldings.length > 1 ? "s" : ""} in my portfolio: **${focusedHoldingsList}**.
+
+Here is my full portfolio for context. Rows marked [PLANNED] are positions I intend to build but don't yet own.
+
+**Portfolio value:** $${totalValue.toFixed(2)}
+
+| Holding | Asset Class | Current Value | Current % | Target % |
+|---------|-------------|---------------|-----------|----------|
+${holdingsTable}${notesSection}
+
+Focus your analysis on **${focusedHoldingsList}**. Structure your response as:
+
+**1. What this news means for ${focusedHoldingsList}** — what is the real mechanism? Does it change the fundamental thesis, or is it short-term noise? Be specific about how this company/fund is affected.
+
+**2. Magnitude read** — tailwind or headwind, and how significant? Give a directional read on the near-term and long-term impact separately.
+
+**3. Portfolio interaction** — does this news change how this position should be sized relative to the rest of the portfolio? Should the target allocation be reconsidered?
+
+**4. The one thing to watch** — the single follow-on signal that would most change your read.`
+          : `${newsBlock}
 
 Here is my current portfolio and target allocation. Rows marked [PLANNED] are positions I intend to build but don't yet own.
 
@@ -529,7 +589,18 @@ Read this portfolio as a macro strategist. Don't try to find a single unified th
 For anything you identify as absent or missing: before calling it out, apply a strict sizing test — a position that would represent less than ~2–3% of this portfolio cannot meaningfully hedge anything or provide real exposure. If a gap passes that test, don't tell me to fill it. Instead, lay out the tradeoff: what exposure I currently have versus what filling the gap would add, what I'd have to give up or dilute to make room for it at meaningful size, and what I stand to gain or lose either way. Let me decide.`;
 
       const systemPrompt = news
-        ? `You are a macro strategist whose job is to translate a specific news event into portfolio-level implications. You are not here to give balanced views — you are here to take the news seriously and tell the investor what it actually means for the positions they hold and the allocation they are targeting.
+        ? isFocused
+          ? `You are a senior equity analyst whose job is to assess the direct impact of a specific news event on a single stock or position. The investor has already identified that this news is relevant to ${focusedHoldingsList} — do not re-litigate that. Go deep on the specific holding.
+
+The investor is 33, growth-oriented, AI-focused, and in the early compounding phase (~$100K milestone 3–4 years out). They want to know whether this news changes the fundamental thesis for this position and what, if anything, they should do about sizing.
+
+Rules:
+- Focus almost entirely on the mentioned position(s). Use the broader portfolio only as context for sizing decisions.
+- Be opinionated. If this news is bad for the stock, say so directly. If it's a non-event for the fundamental thesis despite the noise, say that too.
+- Distinguish between short-term price movement and long-term thesis impact. A 5% gap-down on an earnings miss might be irrelevant to a 3-year thesis — or it might be a signal. Tell the investor which.
+- Do not recommend specific buy/sell actions. Do frame the risk/reward change clearly enough that they can decide.
+- Be specific. Reference the company's actual business model, not just the sector.`
+          : `You are a macro strategist whose job is to translate a specific news event into portfolio-level implications. You are not here to give balanced views — you are here to take the news seriously and tell the investor what it actually means for the positions they hold and the allocation they are targeting.
 
 The investor is 33, growth-oriented, AI-focused, and in the early compounding phase (~$100K milestone 3–4 years out). Contributions matter more than short-term optimization right now. But they still need to know when news changes the risk/reward profile of a position enough to warrant action or re-weighting.
 
@@ -792,14 +863,50 @@ Be specific. Name what each position is doing. Avoid generic portfolio advice. T
         const isPlanned = allRows.find((ar) => ar.id === r.id)?.isPlanned ?? false;
         const sharePrice = isPlanned ? getSharePrice(r.id, r.ticker) : undefined;
         const priceStr = sharePrice != null ? ` | Share price: $${sharePrice.toFixed(2)}` : "";
-        return `- id: "${r.id}" | ${r.ticker || r.name} | ${ASSET_CLASSES.find(a => a.value === r.assetClass)?.label ?? r.assetClass} | Current: ${r.currentPct.toFixed(1)}% | Target: ${r.targetPct.toFixed(1)}% | Computed deploy: $${r.allocation.toFixed(0)} (${r.sharePct.toFixed(1)}% of cash) | Method: ${r.tag}${priceStr}`;
+        const plannedTag = isPlanned ? " | [PLANNED — no position yet]" : "";
+        return `- id: "${r.id}" | ${r.ticker || r.name} | ${ASSET_CLASSES.find(a => a.value === r.assetClass)?.label ?? r.assetClass} | Current: ${r.currentPct.toFixed(1)}% | Target: ${r.targetPct.toFixed(1)}% | Computed deploy: $${r.allocation.toFixed(0)} (${r.sharePct.toFixed(1)}% of cash) | Method: ${r.tag}${priceStr}${plannedTag}`;
       }).join("\n");
 
       const idsList = result.map(r =>
         `- id: "${r.id}" | ${r.ticker || r.name}`
       ).join("\n");
 
-      const userMsg = `I am deploying $${cash.toFixed(0)} into my portfolio using the ${strategyLabel} strategy.
+      const macroContextBlock = deployStrategy === "growth"
+        ? (() => {
+            const parts: string[] = [];
+            if (thesis.trim()) parts.push(`**Macro / portfolio thesis (from prior analysis):**\n${thesis.trim()}`);
+            if (strategistOutput.trim()) parts.push(`**Macro strategist view:**\n${strategistOutput.trim()}`);
+            if (analystOutput.trim()) parts.push(`**Equity analyst view:**\n${analystOutput.trim()}`);
+            return parts.length > 0
+              ? `\n\n---\n${parts.join("\n\n")}\n---\n\nThis macro context is your mandate. Allocate capital to where the macro thesis has conviction — not to where the portfolio is mechanically underweight. A position that is at or above target weight but has strong macro tailwinds should still receive capital. A position with macro headwinds should receive little or none, regardless of how far below target it sits. Do not let gap-filling logic dilute macro conviction.`
+              : "";
+          })()
+        : "";
+
+      const calibrationCriteria = deployStrategy === "growth"
+        ? `- **Macro conviction (primary, decisive)** — the macro thesis and strategist/analyst views above are your mandate. Capital flows to where macro has conviction. Tailwinds get weight; headwinds get reduced or zero allocation. This rule takes precedence over everything else.
+- Growth momentum and expected return — among macro-neutral positions, favor higher-return asset classes and compounders
+- Sequencing — which positions benefit most from receiving capital now vs. later
+- Portfolio construction — accept meaningful skew toward macro-confirmed names; only avoid extreme single-position concentration
+- **Planned positions [PLANNED]** — these are intended holdings with no current exposure. Use macro conviction to decide if now is the right time to open the position with this capital. If macro supports the thesis, establishing a starting stake is a valid and preferred use of deployment capital. If macro is neutral or negative, defer.
+- **Target weights are informational only** — do not treat underweight positions as having a claim on this deployment. If macro does not support a position, gap-filling is not a reason to allocate to it.`
+        : `- Current underweight/overweight status relative to target
+- Asset class expected return and risk profile
+- Portfolio construction quality — avoid over-concentrating in a single position or asset class in a single deployment
+- Sequencing risk — which positions benefit most from early capital (compounding, valuation, momentum)`;
+
+      const deployNotesBlock = deployNotes.trim()
+        ? `\n\n---\n**Macro notes (from news analysis):**\n${deployNotes.trim()}\n---\n\nFactor these notes into your allocation decisions.`
+        : "";
+
+      const activePositions = result.filter(r => r.allocation > 0);
+      const avgPerPosition = activePositions.length > 0 ? cash / activePositions.length : cash;
+      const isThinSpread = cash < SINGLE_DUMP_THRESHOLD || avgPerPosition < MIN_PER_POSITION;
+      const concentrationBlock = isThinSpread
+        ? `\n\n**Contribution size advisory:** This is a small deployment ($${cash.toFixed(0)} across ${activePositions.length} position${activePositions.length !== 1 ? "s" : ""}, averaging $${avgPerPosition.toFixed(0)}/position). At this size, spreading thin across all holdings is likely counterproductive. Strongly consider concentrating the full amount into 1–2 highest-conviction positions rather than distributing mechanically. Set suggestedShare to 0 for positions where the resulting dollar amount would be too small to be meaningful.`
+        : "";
+
+      const userMsg = `I am deploying $${cash.toFixed(0)} into my portfolio using the ${strategyLabel} strategy.${macroContextBlock}${deployNotesBlock}${concentrationBlock}
 
 Portfolio value: $${effectiveTotalValue.toFixed(0)} → $${(effectiveTotalValue + cash).toFixed(0)} post-deploy
 
@@ -807,10 +914,7 @@ Holdings and computed allocation:
 ${holdingsList}
 
 Review each holding's computed share of the $${cash.toFixed(0)} deployment. For each, return your suggested share (as a decimal fraction of total cash, e.g. 0.25 for 25%) based on:
-- Current underweight/overweight status relative to target
-- Asset class expected return and risk profile
-- Portfolio construction quality — avoid over-concentrating in a single position or asset class in a single deployment
-- Sequencing risk — which positions benefit most from early capital (compounding, valuation, momentum)
+${calibrationCriteria}
 
 Holdings with IDs:
 ${idsList}
@@ -825,11 +929,13 @@ Return ONLY a valid JSON array — no markdown, no explanation outside the JSON:
   }
 ]
 
-All suggestedShare values must sum to 1.0 (within 0.01). Do not allocate to holdings at or above target unless there is a strong reason.
+All suggestedShare values must sum to 1.0 (within 0.01).${deployStrategy === "growth" ? " Do NOT use target weight gaps as a reason to allocate — let macro conviction drive the distribution." : " Do not allocate to holdings at or above target unless there is a strong reason."}
 
 If a holding has a "Share price" listed, do not suggest an allocation where (suggestedShare × $${cash.toFixed(0)}) is less than that share price — a sub-share deployment is not actionable.`;
 
-      const systemMsg = `You are a quantitative portfolio manager calibrating a capital deployment plan. Return ONLY valid JSON — no markdown, no explanation outside the array. Every suggestedShare must be a decimal (0.0–1.0). All shares must sum to 1.0. Be realistic and specific. If a holding is already at target, suggestedShare should be 0.`;
+      const systemMsg = deployStrategy === "growth"
+        ? `You are a growth-oriented portfolio manager deploying capital according to a macro thesis. Your job is NOT to fill portfolio gaps or rebalance toward targets — it is to place capital where the macro environment gives you conviction. Ignore how far a position is from its target weight; that is irrelevant in growth mode. Allocate to macro-confirmed positions aggressively and leave macro-headwind positions at zero or near-zero even if they are deeply underweight. Return ONLY valid JSON — no markdown, no explanation outside the array. Every suggestedShare must be a decimal (0.0–1.0). All shares must sum to 1.0.`
+        : `You are a quantitative portfolio manager calibrating a capital deployment plan. Return ONLY valid JSON — no markdown, no explanation outside the array. Every suggestedShare must be a decimal (0.0–1.0). All shares must sum to 1.0. Be realistic and specific. If a holding is already at target, suggestedShare should be 0.`;
 
       const response = await client.messages.create({
         model,
@@ -839,10 +945,32 @@ If a holding has a "Share price" listed, do not suggest an allocation where (sug
       });
 
       const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
-      const jsonMatch = raw.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) throw new Error("Claude didn't return a valid JSON array. Try again.");
 
-      const estimates: { id: string; ticker: string; suggestedShare: number; rationale: string }[] = JSON.parse(jsonMatch[0]);
+      // Walk the string to find the balanced closing bracket, respecting strings and
+      // escape sequences — avoids the greedy-regex problem where trailing text after
+      // the array (or ] inside rationale strings) causes JSON.parse to fail.
+      const extractJsonArray = (text: string): string | null => {
+        const start = text.indexOf("[");
+        if (start === -1) return null;
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        for (let i = start; i < text.length; i++) {
+          const ch = text[i];
+          if (escape) { escape = false; continue; }
+          if (ch === "\\" && inString) { escape = true; continue; }
+          if (ch === '"') { inString = !inString; continue; }
+          if (inString) continue;
+          if (ch === "[") depth++;
+          else if (ch === "]") { depth--; if (depth === 0) return text.slice(start, i + 1); }
+        }
+        return null;
+      };
+
+      const jsonStr = extractJsonArray(raw);
+      if (!jsonStr) throw new Error("Claude didn't return a valid JSON array. Try again.");
+
+      const estimates: { id: string; ticker: string; suggestedShare: number; rationale: string }[] = JSON.parse(jsonStr);
 
       // Build initial calibration map
       const newCalibration: Record<string, { suggestedShare: number; rationale: string }> = {};
@@ -1624,15 +1752,20 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
           {/* ── News input ── */}
           <div className="flex items-center gap-2">
             <div className="relative flex-1">
-              <Globe2 size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-subtle)] pointer-events-none" />
-              <input
-                type="text"
+              <Globe2 size={13} className="absolute left-2.5 top-3 text-[var(--color-text-subtle)] pointer-events-none" />
+              <textarea
                 value={newsTagline}
                 onChange={e => setNewsTagline(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter" && !analyzingThesis && allRows.length > 0) void handlePortfolioThesis(); }}
-                placeholder="Paste a news headline to analyze your positions against it — or leave blank for a general thesis"
-                className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] pl-7 pr-3 py-2 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-subtle)] focus:border-[var(--color-primary)] focus:outline-none"
+                onKeyDown={e => { if (e.key === "Enter" && e.metaKey && !analyzingThesis && allRows.length > 0) void handlePortfolioThesis(); }}
+                placeholder="Paste a headline or full article to analyze your positions against it — or leave blank for a general thesis"
+                rows={3}
+                className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] pl-7 pr-3 py-2 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-subtle)] focus:border-[var(--color-primary)] focus:outline-none resize-y"
               />
+              {detectedHoldings.length > 0 && detectedHoldings.length <= 3 && (
+                <p className="mt-1 text-xs text-[var(--color-primary)]">
+                  Focusing analysis on {detectedHoldings.map((h) => h.ticker || h.name).join(", ")}
+                </p>
+              )}
             </div>
             <Button
               size="sm"
@@ -1753,6 +1886,7 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
                 </Button>
               </div>
 
+
               {deployResult && deployResult.length > 0 && (() => {
                 const cash = parseFloat(deployAmount) || 0;
                 const newTotal = effectiveTotalValue + cash;
@@ -1772,8 +1906,38 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
                   "floor":           "floor",
                   "skipped":         "at weight",
                 };
+
+                // Threshold check: small contribution warning
+                const activePositions = deployResult.filter(r => r.allocation > 0);
+                const avgPerPosition = activePositions.length > 0 ? cash / activePositions.length : cash;
+                const isThinSpread = cash < SINGLE_DUMP_THRESHOLD || avgPerPosition < MIN_PER_POSITION;
+                const topTarget = deployResult.reduce<DeployAllocation | null>(
+                  (best, r) => (r.allocation > (best?.allocation ?? -1) ? r : best), null
+                );
+
                 return (
                   <div className="flex flex-col gap-3">
+                    {isThinSpread && (
+                      <div className="flex items-start gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+                        <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                        <span>
+                          <span className="font-medium">Small contribution</span> — ${cash.toFixed(0)} across {activePositions.length} position{activePositions.length !== 1 ? "s" : ""} averages ${avgPerPosition.toFixed(0)}/position.
+                          {topTarget && (
+                            <> Consider a single dump into <span className="font-medium">{topTarget.ticker || topTarget.name}</span> instead of splitting thin.</>
+                          )}
+                        </span>
+                      </div>
+                    )}
+                    <div>
+                      <p className="text-xs text-[var(--color-text-muted)] mb-1">Macro notes <span className="text-[var(--color-text-subtle)]">(paste from Analyze with Claude)</span></p>
+                      <textarea
+                        value={deployNotes}
+                        onChange={e => setDeployNotes(e.target.value)}
+                        placeholder="Paste headline analysis here to inform calibration…"
+                        rows={3}
+                        className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2 py-1.5 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-subtle)] focus:border-[var(--color-primary)] focus:outline-none resize-none"
+                      />
+                    </div>
                     <div className="flex items-center gap-2">
                       <Button
                         size="sm"
@@ -1791,6 +1955,7 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
                         <p className="text-xs text-[var(--color-danger)]">{deployCalibrationError}</p>
                       )}
                     </div>
+
 
                     <div className="overflow-x-auto">
                       <table className="w-full text-xs border-collapse">

@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from "react";
 import {
   Plus, Trash2, ChevronDown, ChevronRight,
   ArrowDownLeft, ArrowUpRight,
-  Check, X, Minus, Settings2, Trophy, TrendingUp, Link2, ClipboardList, Dices, FileDown,
+  Check, X, Minus, Settings2, Trophy, TrendingUp, Link2, ClipboardList, Dices, FileDown, Pencil,
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line,
@@ -179,6 +179,7 @@ interface FutureFormState {
   stake: string;
   potential_payout: string;
   odds: string;
+  tax: string;
   placed_date: string;
   notes: string;
 }
@@ -188,17 +189,20 @@ interface FutureDialogProps {
   onClose: () => void;
   accounts: { id: string; name: string; platform_type: FantasyPlatformType }[];
   defaultAccountId: string;
+  existing?: { id: string; account_id: string; description: string; stake: number; potential_payout: number | null; odds: string | null; tax: number | null; placed_date: string; notes: string | null };
   onSave: (data: {
     account_id: string; description: string; stake: number;
     potential_payout?: number; odds?: string; placed_date: string; notes?: string;
   }) => Promise<void>;
+  onEdit?: (id: string, data: { description: string; stake: number; potential_payout: number | null; odds: string | null; tax: number | null; placed_date: string; notes: string | null }) => Promise<void>;
 }
 
-function FutureDialog({ open, onClose, accounts, defaultAccountId, onSave }: FutureDialogProps) {
+function FutureDialog({ open, onClose, accounts, defaultAccountId, existing, onSave, onEdit }: FutureDialogProps) {
   const sbAccounts = accounts.filter((a) => !isLeague(a.platform_type));
+  const isEdit = existing != null;
   const [form, setForm] = useState<FutureFormState>({
     account_id: defaultAccountId,
-    description: "", stake: "", potential_payout: "", odds: "",
+    description: "", stake: "", potential_payout: "", odds: "", tax: "",
     placed_date: new Date().toISOString().slice(0, 10), notes: "",
   });
   const [errors, setErrors] = useState<Partial<FutureFormState>>({});
@@ -206,11 +210,24 @@ function FutureDialog({ open, onClose, accounts, defaultAccountId, onSave }: Fut
 
   React.useEffect(() => {
     if (open) {
-      setForm({ account_id: defaultAccountId, description: "", stake: "", potential_payout: "", odds: "",
-        placed_date: new Date().toISOString().slice(0, 10), notes: "" });
+      if (existing) {
+        setForm({
+          account_id: existing.account_id,
+          description: existing.description,
+          stake: String(existing.stake),
+          potential_payout: existing.potential_payout != null ? String(existing.potential_payout) : "",
+          odds: existing.odds ?? "",
+          tax: existing.tax != null ? String(existing.tax) : "",
+          placed_date: existing.placed_date,
+          notes: existing.notes ?? "",
+        });
+      } else {
+        setForm({ account_id: defaultAccountId, description: "", stake: "", potential_payout: "", odds: "", tax: "",
+          placed_date: new Date().toISOString().slice(0, 10), notes: "" });
+      }
       setErrors({});
     }
-  }, [open, defaultAccountId]);
+  }, [open, defaultAccountId, existing]);
 
   async function handleSave() {
     const e: Partial<FutureFormState> = {};
@@ -220,23 +237,35 @@ function FutureDialog({ open, onClose, accounts, defaultAccountId, onSave }: Fut
     setErrors(e);
     if (Object.keys(e).length > 0) return;
     setSaving(true);
-    await onSave({
-      account_id: form.account_id || defaultAccountId,
-      description: form.description.trim(),
-      stake: Number(form.stake),
-      potential_payout: form.potential_payout ? Number(form.potential_payout) : undefined,
-      odds: form.odds.trim() || undefined,
-      placed_date: form.placed_date,
-      notes: form.notes.trim() || undefined,
-    });
+    if (isEdit && existing && onEdit) {
+      await onEdit(existing.id, {
+        description: form.description.trim(),
+        stake: Number(form.stake),
+        potential_payout: form.potential_payout ? Number(form.potential_payout) : null,
+        odds: form.odds.trim() || null,
+        tax: form.tax ? Number(form.tax) : null,
+        placed_date: form.placed_date,
+        notes: form.notes.trim() || null,
+      });
+    } else {
+      await onSave({
+        account_id: form.account_id || defaultAccountId,
+        description: form.description.trim(),
+        stake: Number(form.stake),
+        potential_payout: form.potential_payout ? Number(form.potential_payout) : undefined,
+        odds: form.odds.trim() || undefined,
+        placed_date: form.placed_date,
+        notes: form.notes.trim() || undefined,
+      });
+    }
     setSaving(false);
     onClose();
   }
 
   return (
-    <Dialog open={open} onClose={onClose} title="Add Future">
+    <Dialog open={open} onClose={onClose} title={isEdit ? "Edit Future" : "Add Future"}>
       <div className="flex flex-col gap-4">
-        {sbAccounts.length > 1 && (
+        {!isEdit && sbAccounts.length > 1 && (
           <Select label="Account" options={sbAccounts.map((a) => ({ value: a.id, label: a.name }))}
             value={form.account_id} onChange={(e) => setForm((f) => ({ ...f, account_id: e.target.value }))} />
         )}
@@ -254,13 +283,17 @@ function FutureDialog({ open, onClose, accounts, defaultAccountId, onSave }: Fut
           value={form.potential_payout}
           onChange={(e) => setForm((f) => ({ ...f, potential_payout: e.target.value }))}
           hint="Total amount returned if this bet wins (stake included)." />
+        <Input label="Upfront Tax ($, optional)" type="number" step="0.01" min="0" placeholder="0.00"
+          value={form.tax}
+          onChange={(e) => setForm((f) => ({ ...f, tax: e.target.value }))}
+          hint="Sportsbook-mandated tax paid upfront. Deducted from balance alongside the stake." />
         <Input label="Placed Date" type="date" value={form.placed_date}
           onChange={(e) => setForm((f) => ({ ...f, placed_date: e.target.value }))} error={errors.placed_date} />
         <Input label="Notes (optional)" placeholder="Any context" value={form.notes}
           onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} />
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
-          <Button size="sm" onClick={handleSave} disabled={saving}>{saving ? "Saving…" : "Add Future"}</Button>
+          <Button size="sm" onClick={handleSave} disabled={saving}>{saving ? "Saving…" : isEdit ? "Save Changes" : "Add Future"}</Button>
         </div>
       </div>
     </Dialog>
@@ -923,7 +956,7 @@ export function FantasyPage() {
     balanceSummary, loading: dataLoading,
     currentBalance, totalOpenStake,
     addTransaction, removeTransaction,
-    addFuture, settleFuture, removeFuture,
+    addFuture, editFuture, settleFuture, removeFuture,
     addSeason, settleSeason, removeSeason,
     addContest, resolveContest, editContest, removeContest,
     addBetSession, settleBetSession, removeBetSession,
@@ -937,6 +970,7 @@ export function FantasyPage() {
   const [txErrors, setTxErrors] = useState<Partial<TxFormState>>({});
   const [txSaving, setTxSaving] = useState(false);
   const [futureDialogOpen, setFutureDialogOpen] = useState(false);
+  const [editingFuture, setEditingFuture] = useState<typeof openFutures[0] | null>(null);
   const [seasonDialogOpen, setSeasonDialogOpen] = useState(false);
   const [showSettledFutures, setShowSettledFutures] = useState(false);
   const [showSettledSeasons, setShowSettledSeasons] = useState(false);
@@ -1054,12 +1088,25 @@ export function FantasyPage() {
 
     const totalIn  = sbTotalIn + leagueBuyIn;
     const totalOut = sbTotalOut + leagueWon;
-    // Net P&L: bet session wins + future win payouts − open stakes + league outcomes.
+    // Net P&L: bet session wins + future win payouts + contests + underdog − open/lost stakes − taxes + league outcomes.
     // Deposits and cashouts are neutral fund movements and excluded.
     // starting_balance is pre-existing capital and excluded.
-    const bettingPnL = sbSummary.reduce((s, a) => s + (a.net_betting_pnl ?? 0), 0) + sbWinPayouts;
-    const sbOpenFuturesStake = sbSummary.reduce((s, a) => s + a.open_futures_stake, 0);
-    const netPnL = bettingPnL - sbOpenFuturesStake + leagueWon - leagueBuyIn;
+    const sbOpenFuturesStake  = sbSummary.reduce((s, a) => s + a.open_futures_stake, 0);
+    const sbLostFuturesStake  = sbSummary.reduce((s, a) => s + a.lost_futures_stake, 0);
+    const sbContestNet        = sbSummary.reduce((s, a) => s + a.contest_net, 0);
+    const sbUnderdogNet       = sbSummary.reduce((s, a) => s + a.underdog_net, 0);
+    const sbFuturesTaxPaid    = sbSummary.reduce((s, a) => s + a.futures_tax_paid, 0);
+    // bettingPnL: net from bet sessions + all futures activity (wins credited, losses/open stakes/tax debited)
+    const bettingPnL = sbSummary.reduce((s, a) => s + (a.net_betting_pnl ?? 0), 0)
+      + sbWinPayouts
+      - sbOpenFuturesStake
+      - sbLostFuturesStake
+      - sbFuturesTaxPaid;
+    const netPnL = bettingPnL
+      + sbContestNet
+      + sbUnderdogNet
+      + leagueWon
+      - leagueBuyIn;
     return { totalIn, totalOut, inAccounts, netPnL, bettingPnL };
   }, [sbSummary, seasons, transactions]);
 
@@ -1580,7 +1627,7 @@ export function FantasyPage() {
                   )}>
                     {perfStats.bettingPnL >= 0 ? "+" : ""}{formatCurrency(perfStats.bettingPnL)}
                   </p>
-                  <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">bet sessions + future wins</p>
+                  <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">bet sessions + futures net</p>
                 </CardContent>
               </Card>
             )}
@@ -1866,6 +1913,10 @@ export function FantasyPage() {
                     <td className="py-2.5 pr-3 text-right text-[var(--color-text-muted)]">{formatDate(f.placed_date)}</td>
                     <td className="py-2.5 pl-2">
                       <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                        <button onClick={() => { setEditingFuture(f); setFutureDialogOpen(true); }} title="Edit"
+                          className="rounded p-1 text-[var(--color-text-subtle)] hover:bg-[var(--color-surface-raised)] hover:text-[var(--color-text)]">
+                          <Pencil size={13} />
+                        </button>
                         <button onClick={() => handleSettleFuture(f.id, "won")} title="Won"
                           className="rounded p-1 text-[var(--color-text-subtle)] hover:bg-[var(--color-success)]/15 hover:text-[var(--color-success)]">
                           <Check size={13} />
@@ -2234,13 +2285,15 @@ export function FantasyPage() {
         </div>
       </Dialog>
 
-      {/* Add Future */}
+      {/* Add / Edit Future */}
       <FutureDialog
         open={futureDialogOpen}
-        onClose={() => setFutureDialogOpen(false)}
+        onClose={() => { setFutureDialogOpen(false); setEditingFuture(null); }}
         accounts={accounts}
         defaultAccountId={viewIsLeague ? (sbAccounts[0]?.id ?? "") : (effectiveId === "ALL" ? (sbAccounts[0]?.id ?? "") : effectiveId)}
+        existing={editingFuture ?? undefined}
         onSave={addFuture}
+        onEdit={editFuture}
       />
 
       {/* Log Bet Session */}

@@ -14,6 +14,7 @@ import {
   deleteFantasyTransaction,
   getFantasyFutures,
   insertFantasyFuture,
+  updateFantasyFuture,
   updateFutureStatus,
   deleteFantasyFuture,
   getFantasySeasons,
@@ -167,6 +168,12 @@ export function useFantasyData(accountId: string) {
     await reload();
   }, [conn, reload]);
 
+  const editFuture = useCallback(async (id: string, data: Parameters<typeof updateFantasyFuture>[2]) => {
+    if (!conn) return;
+    await updateFantasyFuture(conn, id, data);
+    await reload();
+  }, [conn, reload]);
+
   const settleFuture = useCallback(async (
     id: string,
     status: FutureStatus,
@@ -270,7 +277,7 @@ export function useFantasyData(accountId: string) {
     currentBalance,
     totalOpenStake,
     addTransaction, removeTransaction,
-    addFuture, settleFuture, removeFuture,
+    addFuture, editFuture, settleFuture, removeFuture,
     addSeason, settleSeason, removeSeason,
     addContest, resolveContest, editContest, removeContest,
     addBetSession, settleBetSession: settleBetSessionCb, removeBetSession,

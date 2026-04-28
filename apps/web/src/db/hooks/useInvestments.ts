@@ -136,11 +136,12 @@ export function useInvestments() {
   const sellHolding = useCallback(
     async (id: string) => {
       if (!conn) return;
-      await sellHoldingQuery(conn, id);
+      const investmentId = holdings.find((h) => h.id === id)?.investment_id ?? "";
+      await sellHoldingQuery(conn, id, investmentId);
       await upsertNetWorthSnapshot(conn);
       await refresh();
     },
-    [conn, refresh]
+    [conn, holdings, refresh]
   );
 
   const lotsByHolding = useCallback(

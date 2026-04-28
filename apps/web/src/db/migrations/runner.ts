@@ -18,6 +18,8 @@ import schema016 from "./016_holding_sold.sql?raw";
 import schema017 from "./017_underdog_bets.sql?raw";
 import schema018 from "./018_underdog_monthly.sql?raw";
 import schema019 from "./019_underdog_tax.sql?raw";
+import schema020 from "./020_futures_tax.sql?raw";
+import schema021 from "./021_purge_sold_holdings.sql?raw";
 
 const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "001_initial_schema", sql: schema001 },
@@ -39,6 +41,8 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "017_underdog_bets", sql: schema017 },
   { name: "018_underdog_monthly", sql: schema018 },
   { name: "019_underdog_tax", sql: schema019 },
+  { name: "020_futures_tax", sql: schema020 },
+  { name: "021_purge_sold_holdings", sql: schema021 },
 ];
 
 export async function runMigrations(conn: AsyncDuckDBConnection): Promise<void> {

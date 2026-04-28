@@ -214,15 +214,15 @@ export async function getAllSoldHoldings(
 
 export async function sellHolding(
   conn: AsyncDuckDBConnection,
-  id: string
+  id: string,
+  investmentId: string
 ): Promise<void> {
-  // Mark as sold — does NOT call syncHoldingsTotals so account value is unchanged.
-  // Sold holdings still contribute to the account total (proceeds = buying power).
   await conn.query(`
     UPDATE investment_holdings
     SET is_sold = TRUE, shares = 0, updated_at = now()
     WHERE id = '${id}'
   `);
+  await syncHoldingsTotals(conn, investmentId);
 }
 
 export async function upsertHolding(
@@ -280,11 +280,13 @@ async function syncHoldingsTotals(
         SELECT COALESCE(SUM(current_value), 0)
         FROM investment_holdings
         WHERE investment_id = '${investmentId}'
+          AND COALESCE(is_sold, FALSE) = FALSE
       ),
       cost_basis = (
         SELECT COALESCE(SUM(cost_basis), 0)
         FROM investment_holdings
         WHERE investment_id = '${investmentId}'
+          AND COALESCE(is_sold, FALSE) = FALSE
       ),
       updated_at = now()
     WHERE id = '${investmentId}'

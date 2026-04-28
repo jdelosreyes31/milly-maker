@@ -39,6 +39,7 @@ export interface FantasyFuture {
   stake: number;
   potential_payout: number | null;
   odds: string | null;
+  tax: number | null;
   status: FutureStatus;
   placed_date: string;
   settled_date: string | null;
@@ -79,6 +80,7 @@ export interface FantasyBalanceSummary {
   underdog_net: number; // net effect of all underdog bets (pending subtracts entry, settled adds winnings)
   contest_net: number; // net effect of all contests (entry fees out, settled winnings in)
   lost_futures_stake: number; // stakes of lost futures placed after account start date
+  futures_tax_paid: number; // upfront sportsbook tax on futures (all statuses) — permanent debit paid at placement
 }
 
 // ── Accounts ──────────────────────────────────────────────────────────────────
@@ -169,7 +171,8 @@ export async function getFantasyBalanceSummary(
       COALESCE(obs.open_bet_sessions_stake, 0.0)::DOUBLE AS open_bet_sessions_stake,
       COALESCE(ud.underdog_net, 0.0)::DOUBLE AS underdog_net,
       COALESCE(cn.contest_net, 0.0)::DOUBLE AS contest_net,
-      COALESCE(lf.lost_futures_stake, 0.0)::DOUBLE AS lost_futures_stake
+      COALESCE(lf.lost_futures_stake, 0.0)::DOUBLE AS lost_futures_stake,
+      COALESCE(ft.futures_tax_paid, 0.0)::DOUBLE AS futures_tax_paid
     FROM fantasy_accounts a
     LEFT JOIN fantasy_transactions t ON t.account_id = a.id
     LEFT JOIN (
@@ -193,7 +196,7 @@ export async function getFantasyBalanceSummary(
       FROM fantasy_futures f
       JOIN fantasy_accounts fa ON f.account_id = fa.id
       WHERE f.status = 'open'
-        AND f.placed_date > fa.starting_date
+        AND f.placed_date >= fa.starting_date
       GROUP BY f.account_id
     ) of_ ON of_.account_id = a.id
     LEFT JOIN (
@@ -221,11 +224,18 @@ export async function getFantasyBalanceSummary(
       FROM fantasy_futures f
       JOIN fantasy_accounts fa ON f.account_id = fa.id
       WHERE f.status = 'lost'
-        AND f.placed_date > fa.starting_date
+        AND f.placed_date >= fa.starting_date
       GROUP BY f.account_id
     ) lf ON lf.account_id = a.id
+    LEFT JOIN (
+      SELECT f.account_id,
+             SUM(COALESCE(f.tax, 0.0))::DOUBLE AS futures_tax_paid
+      FROM fantasy_futures f
+      WHERE f.tax IS NOT NULL
+      GROUP BY f.account_id
+    ) ft ON ft.account_id = a.id
     WHERE a.is_active = true
-    GROUP BY a.id, a.name, a.platform_type, a.starting_balance, a.starting_date, a.end_date, a.created_at, bs.net_betting_pnl, orphan.orphan_linked_in, of_.open_futures_stake, obs.open_bet_sessions_stake, ud.underdog_net, cn.contest_net, lf.lost_futures_stake
+    GROUP BY a.id, a.name, a.platform_type, a.starting_balance, a.starting_date, a.end_date, a.created_at, bs.net_betting_pnl, orphan.orphan_linked_in, of_.open_futures_stake, obs.open_bet_sessions_stake, ud.underdog_net, cn.contest_net, lf.lost_futures_stake, ft.futures_tax_paid
     ORDER BY a.created_at ASC
   `);
 
@@ -233,7 +243,7 @@ export async function getFantasyBalanceSummary(
   return rows.map((r) => ({
     ...r,
     current_balance: Math.round(
-      (r.starting_balance + r.total_deposited + r.orphan_linked_in - r.total_cashout + r.net_betting_pnl - r.open_bet_sessions_stake + r.underdog_net + r.contest_net - r.lost_futures_stake) * 100
+      (r.starting_balance + r.total_deposited + r.orphan_linked_in - r.total_cashout + r.net_betting_pnl - r.open_futures_stake - r.open_bet_sessions_stake + r.underdog_net + r.contest_net - r.lost_futures_stake - r.futures_tax_paid) * 100
     ) / 100,
   }));
 }
@@ -312,7 +322,9 @@ export async function getFantasyFutures(
       f.description,
       f.stake::DOUBLE AS stake,
       f.potential_payout::DOUBLE AS potential_payout,
-      f.odds, f.status,
+      f.odds,
+      f.tax::DOUBLE AS tax,
+      f.status,
       f.placed_date::VARCHAR AS placed_date,
       f.settled_date::VARCHAR AS settled_date,
       f.notes,
@@ -352,6 +364,31 @@ export async function insertFantasyFuture(
       ${data.notes ? `'${esc(data.notes)}'` : "NULL"}
     )
   `);
+}
+
+export async function updateFantasyFuture(
+  conn: AsyncDuckDBConnection,
+  id: string,
+  data: Partial<{
+    description: string;
+    stake: number;
+    potential_payout: number | null;
+    odds: string | null;
+    tax: number | null;
+    placed_date: string;
+    notes: string | null;
+  }>
+): Promise<void> {
+  const sets: string[] = [];
+  if (data.description !== undefined) sets.push(`description = '${esc(data.description)}'`);
+  if (data.stake !== undefined) sets.push(`stake = ${data.stake}`);
+  if ("potential_payout" in data) sets.push(data.potential_payout != null ? `potential_payout = ${data.potential_payout}` : "potential_payout = NULL");
+  if ("odds" in data) sets.push(data.odds != null ? `odds = '${esc(data.odds)}'` : "odds = NULL");
+  if ("tax" in data) sets.push(data.tax != null ? `tax = ${data.tax}` : "tax = NULL");
+  if (data.placed_date !== undefined) sets.push(`placed_date = '${data.placed_date}'`);
+  if ("notes" in data) sets.push(data.notes != null ? `notes = '${esc(data.notes)}'` : "notes = NULL");
+  if (sets.length === 0) return;
+  await conn.query(`UPDATE fantasy_futures SET ${sets.join(", ")} WHERE id = '${id}'`);
 }
 
 export async function updateFutureStatus(
