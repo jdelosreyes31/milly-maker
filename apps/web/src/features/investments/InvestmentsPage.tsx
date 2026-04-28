@@ -436,8 +436,9 @@ export function InvestmentsPage() {
 
       {view === "overview" && (<>
       {/* Stats */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
         <StatCard label="Total Value" value={formatCurrency(totalValue)} accentColor="var(--color-success)" icon={<TrendingUp size={16} />} />
+        <StatCard label="Total Contributions" value={formatCurrency(contributions.reduce((s, c) => s + c.amount, 0))} />
         <StatCard label="Monthly Contribution" value={formatCurrency(totalMonthlyContribution)} />
         <StatCard label="Total Gain / Loss"
           value={formatCurrency(totalGain, true)}
