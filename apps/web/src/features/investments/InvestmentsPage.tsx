@@ -138,6 +138,8 @@ export function InvestmentsPage() {
   const [saving, setSaving] = useState(false);
   const [priceEdits, setPriceEdits] = useState<Record<string, string>>({});
   const [fetchingPrice, setFetchingPrice] = useState<Set<string>>(new Set());
+  const [fetchPriceDialog, setFetchPriceDialog] = useState(false);
+  const [fetchResults, setFetchResults] = useState<Record<string, { status: "pending" | "done" | "error"; price: number | null }>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showAllContribs, setShowAllContribs] = useState(false);
   const [view, setView] = useState<"overview" | "planning" | "forecast" | "actual" | "coast">("overview");
@@ -292,12 +294,27 @@ export function InvestmentsPage() {
     setPriceEdits((prev) => { const next = { ...prev }; delete next[h.id]; return next; });
   }
 
-  async function handleFetchPrice(h: ReturnType<typeof holdingsByAccount>[number]) {
-    if (!h.ticker || !h.shares || h.shares <= 0) return;
-    setFetchingPrice((prev) => new Set(prev).add(h.id));
-    const price = await fetchPrevDayClose(h.ticker);
-    setFetchingPrice((prev) => { const next = new Set(prev); next.delete(h.id); return next; });
-    if (price != null) await handlePriceSave(h, String(price));
+  function openFetchPriceDialog() {
+    const tickerHoldings = holdings.filter((h) => h.ticker && h.shares && h.shares > 0);
+    const initial: Record<string, { status: "pending" | "done" | "error"; price: number | null }> = {};
+    for (const h of tickerHoldings) initial[h.id] = { status: "pending", price: null };
+    setFetchResults(initial);
+    setFetchingPrice(new Set());
+    setFetchPriceDialog(true);
+  }
+
+  async function handleFetchAllPrices() {
+    const tickerHoldings = holdings.filter((h) => h.ticker && h.shares && h.shares > 0);
+    if (tickerHoldings.length === 0) return;
+    setFetchingPrice(new Set(tickerHoldings.map((h) => h.id)));
+    for (let i = 0; i < tickerHoldings.length; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 30000));
+      const h = tickerHoldings[i]!;
+      const price = await fetchPrevDayClose(h.ticker!);
+      setFetchingPrice((prev) => { const next = new Set(prev); next.delete(h.id); return next; });
+      setFetchResults((prev) => ({ ...prev, [h.id]: { status: price != null ? "done" : "error", price } }));
+      if (price != null) await handlePriceSave(h, String(price));
+    }
   }
 
   // ── Contribution dialog helpers ──────────────────────────────────────────
@@ -345,6 +362,9 @@ export function InvestmentsPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Investments</h1>
         <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={openFetchPriceDialog}>
+            <RefreshCw size={14} /> Fetch Prices
+          </Button>
           <Button variant="outline" size="sm" onClick={() => openAddContrib()}>
             <Landmark size={14} /> Log Contribution
           </Button>
@@ -549,16 +569,6 @@ export function InvestmentsPage() {
                                           onBlur={(e) => void handlePriceSave(h, e.target.value)}
                                           onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
                                         />
-                                        {h.ticker && (
-                                          <button
-                                            onClick={() => void handleFetchPrice(h)}
-                                            disabled={fetchingPrice.has(h.id)}
-                                            className="ml-0.5 text-[var(--color-text-subtle)] hover:text-[var(--color-primary)] disabled:opacity-40"
-                                            title={`Fetch prev-day close for ${h.ticker}`}
-                                          >
-                                            <RefreshCw size={9} className={fetchingPrice.has(h.id) ? "animate-spin" : ""} />
-                                          </button>
-                                        )}
                                       </div>
                                     )}
                                   </td>
@@ -981,6 +991,58 @@ export function InvestmentsPage() {
           <div className="flex justify-end gap-2 pt-1">
             <Button variant="outline" size="sm" onClick={() => setContribDialog(false)}>Cancel</Button>
             <Button size="sm" onClick={handleSaveContrib} disabled={saving}>{saving ? "Saving…" : "Log Contribution"}</Button>
+          </div>
+        </div>
+      </Dialog>
+      {/* ── Fetch Prices Dialog ── */}
+      <Dialog open={fetchPriceDialog} onClose={() => setFetchPriceDialog(false)} title="Fetch Prev-Day Prices">
+        <div className="flex flex-col gap-4">
+          {(() => {
+            const tickerHoldings = holdings.filter((h) => h.ticker && h.shares && h.shares > 0);
+            if (tickerHoldings.length === 0) {
+              return <p className="text-sm text-[var(--color-text-muted)]">No holdings with a ticker and share count found.</p>;
+            }
+            return (
+              <>
+                <p className="text-sm text-[var(--color-text-muted)]">
+                  Fetches the previous trading day's closing price for each holding and updates current value.
+                </p>
+                <div className="flex flex-col gap-1">
+                  {tickerHoldings.map((h) => {
+                    const result = fetchResults[h.id];
+                    const isFetching = fetchingPrice.has(h.id);
+                    return (
+                      <div key={h.id} className="flex items-center justify-between text-sm py-1 border-b border-[var(--color-border)] last:border-0">
+                        <span className="font-mono font-medium">{h.ticker}</span>
+                        <span className="text-xs text-[var(--color-text-muted)]">{h.name}</span>
+                        <span className="text-xs tabular-nums min-w-[80px] text-right">
+                          {isFetching ? (
+                            <span className="text-[var(--color-text-subtle)]">fetching…</span>
+                          ) : result?.status === "done" && result.price != null ? (
+                            <span className="text-[var(--color-success)]">${result.price.toFixed(2)} ✓</span>
+                          ) : result?.status === "error" ? (
+                            <span className="text-[var(--color-danger)]">failed</span>
+                          ) : (
+                            <span className="text-[var(--color-text-subtle)]">—</span>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            );
+          })()}
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" size="sm" onClick={() => setFetchPriceDialog(false)}>Close</Button>
+            <Button
+              size="sm"
+              onClick={() => void handleFetchAllPrices()}
+              disabled={fetchingPrice.size > 0}
+            >
+              <RefreshCw size={12} className={fetchingPrice.size > 0 ? "animate-spin" : ""} />
+              {fetchingPrice.size > 0 ? "Fetching…" : "Fetch All"}
+            </Button>
           </div>
         </div>
       </Dialog>

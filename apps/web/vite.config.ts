@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
@@ -24,7 +24,11 @@ function coopCoepPlugin() {
   };
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "");
+  const massiveKey = env.VITE_MASSIVE_API_KEY;
+
+  return {
   plugins: [react(), tailwindcss(), coopCoepPlugin()],
   server: {
     proxy: {
@@ -32,6 +36,16 @@ export default defineConfig({
         target: "https://query1.finance.yahoo.com",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/yf-api/, ""),
+      },
+      "/massive-api": {
+        target: "https://api.massive.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/massive-api/, ""),
+        configure: (proxy) => {
+          proxy.on("proxyReq", (proxyReq) => {
+            if (massiveKey) proxyReq.setHeader("Authorization", `Bearer ${massiveKey}`);
+          });
+        },
       },
     },
   },
@@ -47,4 +61,5 @@ export default defineConfig({
   worker: {
     format: "es",
   },
+  };
 });
