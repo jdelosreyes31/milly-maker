@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { Plus, Trash2, Pencil, TrendingUp, ChevronDown, ChevronRight, Landmark, ShoppingCart, TrendingDown } from "lucide-react";
+import { Plus, Trash2, Pencil, TrendingUp, ChevronDown, ChevronRight, Landmark, ShoppingCart, TrendingDown, RefreshCw } from "lucide-react";
 import {
   Button, Card, CardContent, CardHeader, CardTitle,
   Dialog, Input, Select, StatCard, Badge, formatCurrency, formatPercent,
@@ -17,6 +17,7 @@ import {
   ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell,
 } from "recharts";
 import type { Investment } from "@/db/queries/investments.js";
+import { fetchPrevDayClose } from "@/lib/massiveApi.js";
 import { InvestmentPlanningView } from "./InvestmentPlanningView.js";
 import { InvestmentForecastView } from "./InvestmentForecastView.js";
 import { InvestmentActualView } from "./InvestmentActualView.js";
@@ -136,6 +137,7 @@ export function InvestmentsPage() {
 
   const [saving, setSaving] = useState(false);
   const [priceEdits, setPriceEdits] = useState<Record<string, string>>({});
+  const [fetchingPrice, setFetchingPrice] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showAllContribs, setShowAllContribs] = useState(false);
   const [view, setView] = useState<"overview" | "planning" | "forecast" | "actual" | "coast">("overview");
@@ -288,6 +290,14 @@ export function InvestmentsPage() {
       cost_basis: h.cost_basis, asset_class: h.asset_class,
     });
     setPriceEdits((prev) => { const next = { ...prev }; delete next[h.id]; return next; });
+  }
+
+  async function handleFetchPrice(h: ReturnType<typeof holdingsByAccount>[number]) {
+    if (!h.ticker || !h.shares || h.shares <= 0) return;
+    setFetchingPrice((prev) => new Set(prev).add(h.id));
+    const price = await fetchPrevDayClose(h.ticker);
+    setFetchingPrice((prev) => { const next = new Set(prev); next.delete(h.id); return next; });
+    if (price != null) await handlePriceSave(h, String(price));
   }
 
   // ── Contribution dialog helpers ──────────────────────────────────────────
@@ -539,6 +549,16 @@ export function InvestmentsPage() {
                                           onBlur={(e) => void handlePriceSave(h, e.target.value)}
                                           onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
                                         />
+                                        {h.ticker && (
+                                          <button
+                                            onClick={() => void handleFetchPrice(h)}
+                                            disabled={fetchingPrice.has(h.id)}
+                                            className="ml-0.5 text-[var(--color-text-subtle)] hover:text-[var(--color-primary)] disabled:opacity-40"
+                                            title={`Fetch prev-day close for ${h.ticker}`}
+                                          >
+                                            <RefreshCw size={9} className={fetchingPrice.has(h.id) ? "animate-spin" : ""} />
+                                          </button>
+                                        )}
                                       </div>
                                     )}
                                   </td>
