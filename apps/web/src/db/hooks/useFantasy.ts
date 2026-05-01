@@ -34,8 +34,12 @@ import {
   insertUnderdogBet,
   updateUnderdogBet,
   deleteUnderdogBet,
+  getUnderdogNetForMonth,
+  adjustAccountStartingBalance,
+  deleteUnderdogBetsForMonth,
   getUnderdogTargets,
   upsertUnderdogTarget,
+  deleteUnderdogTargetForMonth,
 } from "../queries/fantasy.js";
 import type {
   FantasyAccount,
@@ -352,7 +356,15 @@ export function useUnderdogBets(accountId: string) {
     await reload();
   }, [conn, reload]);
 
-  return { bets, loading, addBet, editBet, removeBet, reload };
+  const removeMonthBets = useCallback(async (month: string) => {
+    if (!conn) return;
+    const net = await getUnderdogNetForMonth(conn, accountId, month);
+    await adjustAccountStartingBalance(conn, accountId, net);
+    await deleteUnderdogBetsForMonth(conn, accountId, month);
+    await reload();
+  }, [conn, accountId, reload]);
+
+  return { bets, loading, addBet, editBet, removeBet, removeMonthBets, reload };
 }
 
 // ── Underdog Monthly Targets ──────────────────────────────────────────────────
@@ -379,5 +391,11 @@ export function useUnderdogTargets(accountId: string) {
     await reload();
   }, [conn, accountId, reload]);
 
-  return { targets, saveTarget, reload };
+  const removeMonthTarget = useCallback(async (month: string) => {
+    if (!conn) return;
+    await deleteUnderdogTargetForMonth(conn, accountId, month);
+    await reload();
+  }, [conn, accountId, reload]);
+
+  return { targets, saveTarget, removeMonthTarget, reload };
 }

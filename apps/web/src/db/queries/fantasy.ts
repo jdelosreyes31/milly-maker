@@ -928,3 +928,51 @@ export async function upsertUnderdogTarget(
     WHERE account_id = '${accountId}' AND month = '${month}'
   `);
 }
+
+export async function getUnderdogNetForMonth(
+  conn: AsyncDuckDBConnection,
+  accountId: string,
+  month: string
+): Promise<number> {
+  const result = await conn.query(`
+    SELECT COALESCE(SUM(COALESCE(settled, 0.0) - COALESCE(tax, 0.0) - entry_size), 0.0)::DOUBLE AS net
+    FROM underdog_bets
+    WHERE account_id = '${accountId}' AND entry_date LIKE '${month}-%'
+  `);
+  const rows = result.toArray() as { net: number }[];
+  return rows[0]?.net ?? 0;
+}
+
+export async function adjustAccountStartingBalance(
+  conn: AsyncDuckDBConnection,
+  accountId: string,
+  delta: number
+): Promise<void> {
+  await conn.query(`
+    UPDATE fantasy_accounts
+    SET starting_balance = starting_balance + ${delta}
+    WHERE id = '${accountId}'
+  `);
+}
+
+export async function deleteUnderdogBetsForMonth(
+  conn: AsyncDuckDBConnection,
+  accountId: string,
+  month: string
+): Promise<void> {
+  await conn.query(`
+    DELETE FROM underdog_bets
+    WHERE account_id = '${accountId}' AND entry_date LIKE '${month}-%'
+  `);
+}
+
+export async function deleteUnderdogTargetForMonth(
+  conn: AsyncDuckDBConnection,
+  accountId: string,
+  month: string
+): Promise<void> {
+  await conn.query(`
+    DELETE FROM underdog_monthly_targets
+    WHERE account_id = '${accountId}' AND month = '${month}'
+  `);
+}

@@ -960,6 +960,7 @@ export function FantasyPage() {
     addSeason, settleSeason, removeSeason,
     addContest, resolveContest, editContest, removeContest,
     addBetSession, settleBetSession, removeBetSession,
+    reload: reloadFantasyData,
   } = useFantasyData(effectiveId);
 
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -2224,7 +2225,7 @@ export function FantasyPage() {
 
       {/* ── Bet Log ─────────────────────────────────────────────────────────── */}
       {simTab === "bets" && !viewIsLeague && !viewIsAll && (
-        <UnderdogBetLog accountId={effectiveId} />
+        <UnderdogBetLog accountId={effectiveId} onReloadBalance={reloadFantasyData} />
       )}
 
       {/* ── Monte Carlo Simulator ────────────────────────────────────────────── */}
@@ -3162,15 +3163,16 @@ function EditableCell({
   );
 }
 
-function UnderdogBetLog({ accountId }: { accountId: string }) {
-  const { bets, addBet, editBet, removeBet } = useUnderdogBets(accountId);
-  const { targets, saveTarget } = useUnderdogTargets(accountId);
+function UnderdogBetLog({ accountId, onReloadBalance }: { accountId: string; onReloadBalance?: () => void }) {
+  const { bets, addBet, editBet, removeBet, removeMonthBets } = useUnderdogBets(accountId);
+  const { targets, saveTarget, removeMonthTarget } = useUnderdogTargets(accountId);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingBet, setEditingBet] = useState<UnderdogBet | null>(null);
   const [form, setForm] = useState<BetFormState>(EMPTY_BET_FORM);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [confirmDeleteMonth, setConfirmDeleteMonth] = useState<string | null>(null);
 
   // ── Monthly summary ────────────────────────────────────────────────────────
   const months = React.useMemo(() => buildMonthRange(bets, targets), [bets, targets]);
@@ -3341,8 +3343,16 @@ function UnderdogBetLog({ accountId }: { accountId: string }) {
                   return (
                     <tr key={row.month} className={cn("group", isCurrentMonth && "bg-[var(--color-primary)]/5")}>
                       <td className="py-2 pr-4 font-semibold sticky left-0 bg-[var(--color-surface)] group-[.bg-primary\\/5]:bg-[var(--color-primary)]/5">
-                        {monthLabel(row.month)}
-                        {isCurrentMonth && <span className="ml-1.5 text-[9px] text-[var(--color-primary)]">now</span>}
+                        <div className="flex items-center gap-1.5">
+                          {monthLabel(row.month)}
+                          {isCurrentMonth && <span className="text-[9px] text-[var(--color-primary)]">now</span>}
+                          <button
+                            onClick={() => setConfirmDeleteMonth(row.month)}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity rounded p-0.5 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]"
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        </div>
                       </td>
                       <td className="py-2 pr-3 text-right font-mono">{row.betsMade > 0 ? cur(row.betTotal) : "—"}</td>
                       <td className="py-2 pr-3 text-right">{row.betsMade || "—"}</td>
@@ -3638,12 +3648,32 @@ function UnderdogBetLog({ accountId }: { accountId: string }) {
         </div>
       </Dialog>
 
-      {/* Confirm delete */}
+      {/* Confirm delete bet */}
       <Dialog open={confirmDelete !== null} onClose={() => setConfirmDelete(null)} title="Delete Entry?">
         <p className="text-sm text-[var(--color-text-muted)]">This entry will be permanently removed.</p>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" size="sm" onClick={() => setConfirmDelete(null)}>Cancel</Button>
           <Button size="sm" onClick={async () => { if (confirmDelete) { await removeBet(confirmDelete); setConfirmDelete(null); } }}>
+            Delete
+          </Button>
+        </div>
+      </Dialog>
+
+      {/* Confirm delete month */}
+      <Dialog open={confirmDeleteMonth !== null} onClose={() => setConfirmDeleteMonth(null)} title="Delete Month?">
+        <p className="text-sm text-[var(--color-text-muted)]">
+          This will permanently remove all bets and targets for <span className="font-semibold">{confirmDeleteMonth ? monthLabel(confirmDeleteMonth) : ""}</span>.
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={() => setConfirmDeleteMonth(null)}>Cancel</Button>
+          <Button size="sm" onClick={async () => {
+            if (confirmDeleteMonth) {
+              await removeMonthBets(confirmDeleteMonth);
+              await removeMonthTarget(confirmDeleteMonth);
+              setConfirmDeleteMonth(null);
+              onReloadBalance?.();
+            }
+          }}>
             Delete
           </Button>
         </div>
