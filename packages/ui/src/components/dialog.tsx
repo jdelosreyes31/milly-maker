@@ -31,12 +31,12 @@ function Dialog({ open, onClose, title, children, className }: DialogProps) {
       {/* Panel */}
       <div
         className={cn(
-          "relative z-10 w-full max-w-lg rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-6 shadow-2xl",
+          "relative z-10 flex flex-col w-full max-w-lg max-h-[90vh] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl",
           className
         )}
       >
         {title && (
-          <div className="mb-5 flex items-center justify-between">
+          <div className="flex-shrink-0 px-6 pt-6 pb-4 flex items-center justify-between border-b border-[var(--color-border)]">
             <h2 className="text-lg font-semibold">{title}</h2>
             <button
               onClick={onClose}
@@ -46,7 +46,9 @@ function Dialog({ open, onClose, title, children, className }: DialogProps) {
             </button>
           </div>
         )}
-        {children}
+        <div className="flex-1 overflow-y-auto p-6">
+          {children}
+        </div>
       </div>
     </div>
   );

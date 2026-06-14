@@ -2230,7 +2230,7 @@ export function FantasyPage() {
 
       {/* ── Monte Carlo Simulator ────────────────────────────────────────────── */}
       {simTab === "simulator" && !viewIsLeague && !viewIsAll && (
-        <MonteCarloSimulator bankroll={currentBalance} payout={3.5} />
+        <MonteCarloSimulator bankroll={currentBalance} />
       )}
 
       {/* ── Dialogs ─────────────────────────────────────────────────────────── */}
@@ -2535,11 +2535,12 @@ interface SimBetRow {
   numBets: string;
   evMin: string;
   evMax: string;
+  payout: string;
   manualAmount: string;
 }
 
 interface SimResult {
-  betSummary: { numBets: number; ev: number; amount: number; kelly: number; halfKelly: number }[];
+  betSummary: { numBets: number; ev: number; payout: number; amount: number; kelly: number; halfKelly: number }[];
   totalExpectedProfit: number;
   totalStake: number;
   expectedFinal: number;
@@ -2568,18 +2569,17 @@ function simPercentile(sorted: Float64Array, p: number): number {
 
 const N_SIM_TRIALS = 10_000;
 
-function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { bankroll: number; payout: number }) {
+function MonteCarloSimulator({ bankroll: initBankroll }: { bankroll: number }) {
   const [bankroll, setBankroll] = useState(initBankroll > 0 ? String(initBankroll) : "");
-  const [payout, setPayout] = useState(String(initPayout));
   const [rows, setRows] = useState<SimBetRow[]>([
-    { id: crypto.randomUUID(), numBets: "75", evMin: "6", evMax: "6", manualAmount: "" },
-    { id: crypto.randomUUID(), numBets: "45", evMin: "17", evMax: "17", manualAmount: "" },
+    { id: crypto.randomUUID(), numBets: "75", evMin: "6", evMax: "6", payout: "3.5", manualAmount: "" },
+    { id: crypto.randomUUID(), numBets: "45", evMin: "17", evMax: "17", payout: "3.5", manualAmount: "" },
   ]);
   const [result, setResult] = useState<SimResult | null>(null);
 
 
   function addRow() {
-    setRows((r) => [...r, { id: crypto.randomUUID(), numBets: "", evMin: "", evMax: "", manualAmount: "" }]);
+    setRows((r) => [...r, { id: crypto.randomUUID(), numBets: "", evMin: "", evMax: "", payout: "3.5", manualAmount: "" }]);
   }
   function removeRow(id: string) {
     setRows((r) => r.filter((row) => row.id !== id));
@@ -2590,22 +2590,22 @@ function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { b
 
   function runSim() {
     const br = parseFloat(bankroll);
-    const pay = parseFloat(payout);
-    if (!br || !pay || br <= 0 || pay <= 0) return;
+    if (!br || br <= 0) return;
 
     const betSummary: SimResult["betSummary"] = [];
-    const betGroups: { n: number; ev: number; amt: number }[] = [];
+    const betGroups: { n: number; ev: number; amt: number; payout: number }[] = [];
 
     for (const row of rows) {
       const n = parseInt(row.numBets);
       const evMin = parseFloat(row.evMin) / 100;
       const evMax = parseFloat(row.evMax) / 100;
-      if (!n || isNaN(evMin) || isNaN(evMax)) continue;
+      const pay = parseFloat(row.payout);
+      if (!n || isNaN(evMin) || isNaN(evMax) || !pay || pay <= 0) continue;
       const ev = (evMin + evMax) / 2;
       const kf = kellyFrac(pay, ev, true);
       const amt = row.manualAmount !== "" ? parseFloat(row.manualAmount) : Math.max(0, Math.round(kf * br * 100) / 100);
-      betSummary.push({ numBets: n, ev, amount: amt, kelly: kellyFrac(pay, ev, false), halfKelly: kf });
-      betGroups.push({ n, ev, amt });
+      betSummary.push({ numBets: n, ev, payout: pay, amount: amt, kelly: kellyFrac(pay, ev, false), halfKelly: kf });
+      betGroups.push({ n, ev, amt, payout: pay });
     }
 
     const totalStake = betGroups.reduce((s, g) => s + g.n * g.amt, 0);
@@ -2618,10 +2618,10 @@ function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { b
       let bal = br;
       for (const g of betGroups) {
         const ev = g.ev;
-        const p = 1 / (pay / (1 + ev));
+        const p = 1 / (g.payout / (1 + ev));
         for (let i = 0; i < g.n; i++) {
           bal -= g.amt;
-          if (Math.random() < p) bal += g.amt * pay;
+          if (Math.random() < p) bal += g.amt * g.payout;
         }
       }
       finals[t] = bal;
@@ -2696,7 +2696,7 @@ function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { b
     doc.setFontSize(8);
     doc.setTextColor(120);
     doc.text(`Generated ${new Date().toLocaleString()} · ${N_SIM_TRIALS.toLocaleString()} trials`, margin, y);
-    doc.text(`Bankroll: ${fmt(parseFloat(bankroll))} · Payout: ${payout}×`, W - margin, y, { align: "right" });
+    doc.text(`Bankroll: ${fmt(parseFloat(bankroll))}`, W - margin, y, { align: "right" });
     y += 6;
     doc.setDrawColor(220);
     doc.line(margin, y, W - margin, y);
@@ -2709,8 +2709,8 @@ function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { b
     doc.text("Kelly Sizing", margin, y);
     y += 5;
 
-    const kellyHeaders = ["# Bets", "EV", "Full Kelly", "Half Kelly", "Bet Amt", "Total Stake"];
-    const colWidths = [18, 18, 24, 24, 24, 28];
+    const kellyHeaders = ["# Bets", "EV", "Payout", "Full Kelly", "Half Kelly", "Bet Amt", "Total Stake"];
+    const colWidths = [18, 18, 18, 22, 22, 22, 26];
     doc.setFontSize(7.5);
     doc.setFont("helvetica", "bold");
     doc.setFillColor(245, 245, 248);
@@ -2723,6 +2723,7 @@ function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { b
       const cells = [
         String(row.numBets),
         fmtPct(row.ev * 100),
+        `${row.payout}×`,
         fmtPct(row.kelly * 100),
         fmtPct(row.halfKelly * 100),
         fmt(row.amount),
@@ -2834,25 +2835,14 @@ function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { b
       {/* Inputs */}
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5">
         <h3 className="mb-4 text-sm font-semibold text-[var(--color-text-primary)]">Parameters</h3>
-        <div className="mb-4 grid grid-cols-2 gap-4 sm:grid-cols-2">
-          <div>
-            <label className="mb-1 block text-xs text-[var(--color-text-subtle)]">Bankroll</label>
-            <input
-              type="number" step="1" value={bankroll}
-              onChange={(e) => setBankroll(e.target.value)}
-              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:border-[var(--color-primary)] focus:outline-none"
-              placeholder="e.g. 500"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-[var(--color-text-subtle)]">Payout Multiplier</label>
-            <input
-              type="number" step="0.1" value={payout}
-              onChange={(e) => setPayout(e.target.value)}
-              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:border-[var(--color-primary)] focus:outline-none"
-              placeholder="e.g. 3.5"
-            />
-          </div>
+        <div className="mb-4">
+          <label className="mb-1 block text-xs text-[var(--color-text-subtle)]">Bankroll</label>
+          <input
+            type="number" step="1" value={bankroll}
+            onChange={(e) => setBankroll(e.target.value)}
+            className="w-48 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:border-[var(--color-primary)] focus:outline-none"
+            placeholder="e.g. 500"
+          />
         </div>
 
         {/* Bet groups table */}
@@ -2863,6 +2853,7 @@ function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { b
                 <th className="pb-2 pr-3 font-medium"># Bets</th>
                 <th className="pb-2 pr-3 font-medium">EV Min %</th>
                 <th className="pb-2 pr-3 font-medium">EV Max %</th>
+                <th className="pb-2 pr-3 font-medium">Payout</th>
                 <th className="pb-2 pr-3 font-medium">Manual Amt</th>
                 <th className="pb-2"></th>
               </tr>
@@ -2870,16 +2861,31 @@ function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { b
             <tbody className="divide-y divide-[var(--color-border)]">
               {rows.map((row) => (
                 <tr key={row.id}>
-                  {(["numBets", "evMin", "evMax", "manualAmount"] as const).map((field) => (
+                  {(["numBets", "evMin", "evMax"] as const).map((field) => (
                     <td key={field} className="py-1.5 pr-3">
                       <input
                         type="number" step="1" value={row[field]}
                         onChange={(e) => updateRow(row.id, field, e.target.value)}
                         className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 focus:border-[var(--color-primary)] focus:outline-none"
-                        placeholder={field === "manualAmount" ? "auto" : ""}
                       />
                     </td>
                   ))}
+                  <td className="py-1.5 pr-3">
+                    <input
+                      type="number" step="0.1" value={row.payout}
+                      onChange={(e) => updateRow(row.id, "payout", e.target.value)}
+                      className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 focus:border-[var(--color-primary)] focus:outline-none"
+                      placeholder="e.g. 3.5"
+                    />
+                  </td>
+                  <td className="py-1.5 pr-3">
+                    <input
+                      type="number" step="1" value={row.manualAmount}
+                      onChange={(e) => updateRow(row.id, "manualAmount", e.target.value)}
+                      className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 focus:border-[var(--color-primary)] focus:outline-none"
+                      placeholder="auto"
+                    />
+                  </td>
                   <td className="py-1.5">
                     <button onClick={() => removeRow(row.id)} className="text-[var(--color-text-subtle)] hover:text-red-500">✕</button>
                   </td>
@@ -2920,6 +2926,7 @@ function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { b
                   <tr className="border-b border-[var(--color-border)] text-left text-[var(--color-text-subtle)]">
                     <th className="pb-2 pr-4 font-medium"># Bets</th>
                     <th className="pb-2 pr-4 font-medium">EV</th>
+                    <th className="pb-2 pr-4 font-medium">Payout</th>
                     <th className="pb-2 pr-4 font-medium">Full Kelly</th>
                     <th className="pb-2 pr-4 font-medium">Half Kelly</th>
                     <th className="pb-2 pr-4 font-medium">Bet Amount</th>
@@ -2931,6 +2938,7 @@ function MonteCarloSimulator({ bankroll: initBankroll, payout: initPayout }: { b
                     <tr key={i}>
                       <td className="py-1.5 pr-4 font-mono">{row.numBets}</td>
                       <td className="py-1.5 pr-4 font-mono">{fmtPct(row.ev * 100)}</td>
+                      <td className="py-1.5 pr-4 font-mono">{row.payout}×</td>
                       <td className="py-1.5 pr-4 font-mono">{fmtPct(row.kelly * 100)}</td>
                       <td className="py-1.5 pr-4 font-mono">{fmtPct(row.halfKelly * 100)}</td>
                       <td className="py-1.5 pr-4 font-mono">{fmt(row.amount)}</td>
@@ -3019,6 +3027,12 @@ function monthLabel(yyyyMm: string): string {
   const [y, m] = yyyyMm.split("-");
   return `${MONTH_NAMES[parseInt(m ?? "1") - 1]} ${y}`;
 }
+
+const BET_RANGES = [
+  { label: "0–11", min: 0, max: 12 },
+  { label: "12–19", min: 12, max: 20 },
+  { label: "20+", min: 20, max: Infinity },
+];
 
 /** Returns sorted unique YYYY-MM strings covering all bets + targets + current month */
 function buildMonthRange(bets: UnderdogBet[], targets: UnderdogMonthlyTarget[]): string[] {
@@ -3178,6 +3192,12 @@ function UnderdogBetLog({ accountId, onReloadBalance }: { accountId: string; onR
   const months = React.useMemo(() => buildMonthRange(bets, targets), [bets, targets]);
   const monthRows = React.useMemo(() => buildMonthRows(bets, targets, months), [bets, targets, months]);
 
+  const currentMonthKey = new Date().toISOString().slice(0, 7);
+  const monthBets = React.useMemo(
+    () => bets.filter((b) => b.entry_date.startsWith(currentMonthKey)),
+    [bets, currentMonthKey],
+  );
+
   // ── Bet dialog helpers ─────────────────────────────────────────────────────
   function openAdd() {
     setEditingBet(null);
@@ -3255,9 +3275,19 @@ function UnderdogBetLog({ accountId, onReloadBalance }: { accountId: string; onR
     };
   }, [bets]);
 
+  const rangeStats = React.useMemo(() => BET_RANGES.map(({ label, min, max }) => {
+    const rb = monthBets.filter((b) => b.oddsjam_ev != null && (b.oddsjam_ev * 100) >= min && (b.oddsjam_ev * 100) < max);
+    const settled = rb.filter((b) => b.settled !== null);
+    const pnl = settled.reduce((s, b) => s + (b.settled ?? 0) - b.entry_size, 0);
+    const evBets = rb.filter((b) => b.oddsjam_ev != null);
+    const avgEv = evBets.length > 0 ? evBets.reduce((s, b) => s + (b.oddsjam_ev ?? 0), 0) / evBets.length : null;
+    const expWins = rb.filter((b) => b.oddsjam_hit != null).reduce((s, b) => s + (b.oddsjam_hit ?? 0), 0);
+    return { label, count: rb.length, pnl, avgEv, expWins, hasData: rb.length > 0 };
+  }), [monthBets]);
+
   const riskStats = React.useMemo(() => {
-    if (bets.length === 0) return null;
-    const sorted = [...bets].sort((a, b) => a.entry_date.localeCompare(b.entry_date));
+    if (monthBets.length === 0) return null;
+    const sorted = [...monthBets].sort((a, b) => a.entry_date.localeCompare(b.entry_date));
 
     // Running P&L → drawdown
     let running = 0, peak = 0, maxDrawdown = 0;
@@ -3291,7 +3321,7 @@ function UnderdogBetLog({ accountId, onReloadBalance }: { accountId: string; onR
     }
 
     return { maxDrawdown, currentDrawdown, maxProfitDay, maxLossStreak: maxStreak };
-  }, [bets]);
+  }, [monthBets]);
 
   const pct = (v: number | null) => v != null ? `${(v * 100).toFixed(2)}%` : "—";
   const cur = (v: number | null) => v != null ? formatCurrency(v) : "—";
@@ -3432,44 +3462,90 @@ function UnderdogBetLog({ accountId, onReloadBalance }: { accountId: string; onR
         </CardContent>
       </Card>
 
-      {/* ── Risk Stats ────────────────────────────────────────────────────────── */}
-      {riskStats && (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[
-            {
-              label: "Max Drawdown",
-              value: formatCurrency(riskStats.maxDrawdown),
-              sub: "peak → trough",
-              danger: riskStats.maxDrawdown > 0,
-            },
-            {
-              label: "Current Drawdown",
-              value: formatCurrency(riskStats.currentDrawdown),
-              sub: riskStats.currentDrawdown === 0 ? "at peak" : "from peak",
-              danger: riskStats.currentDrawdown > 0,
-            },
-            {
-              label: "Best Day",
-              value: riskStats.maxProfitDay ? formatCurrency(riskStats.maxProfitDay.amount) : "—",
-              sub: riskStats.maxProfitDay ? formatDate(riskStats.maxProfitDay.date) : "no settled bets",
-              success: riskStats.maxProfitDay != null && riskStats.maxProfitDay.amount > 0,
-            },
-            {
-              label: "Longest Loss Streak",
-              value: riskStats.maxLossStreak > 0 ? `${riskStats.maxLossStreak} bets` : "—",
-              sub: "consecutive losses",
-              danger: riskStats.maxLossStreak >= 3,
-            },
-          ].map(({ label, value, sub, danger, success }) => (
-            <div key={label} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-subtle)]">{label}</div>
-              <div className={cn("mt-1 font-mono text-lg font-semibold",
-                danger ? "text-[var(--color-danger)]" : success ? "text-[var(--color-success)]" : "text-[var(--color-text-primary)]"
-              )}>{value}</div>
-              <div className="text-[10px] text-[var(--color-text-subtle)]">{sub}</div>
+      {/* ── Monthly Diagnostics ───────────────────────────────────────────────── */}
+      {(riskStats || monthBets.length > 0) && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-semibold">{monthLabel(currentMonthKey)} · Diagnostics</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Drawdown / risk cards */}
+            {riskStats && (
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {[
+                  {
+                    label: "Max Drawdown",
+                    value: formatCurrency(riskStats.maxDrawdown),
+                    sub: "peak → trough",
+                    danger: riskStats.maxDrawdown > 0,
+                  },
+                  {
+                    label: "Current Drawdown",
+                    value: formatCurrency(riskStats.currentDrawdown),
+                    sub: riskStats.currentDrawdown === 0 ? "at peak" : "from peak",
+                    danger: riskStats.currentDrawdown > 0,
+                  },
+                  {
+                    label: "Best Day",
+                    value: riskStats.maxProfitDay ? formatCurrency(riskStats.maxProfitDay.amount) : "—",
+                    sub: riskStats.maxProfitDay ? formatDate(riskStats.maxProfitDay.date) : "no settled bets",
+                    success: riskStats.maxProfitDay != null && riskStats.maxProfitDay.amount > 0,
+                  },
+                  {
+                    label: "Longest Loss Streak",
+                    value: riskStats.maxLossStreak > 0 ? `${riskStats.maxLossStreak} bets` : "—",
+                    sub: "consecutive losses",
+                    danger: riskStats.maxLossStreak >= 3,
+                  },
+                ].map(({ label, value, sub, danger, success }) => (
+                  <div key={label} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-subtle)]">{label}</div>
+                    <div className={cn("mt-1 font-mono text-lg font-semibold",
+                      danger ? "text-[var(--color-danger)]" : success ? "text-[var(--color-success)]" : "text-[var(--color-text-primary)]"
+                    )}>{value}</div>
+                    <div className="text-[10px] text-[var(--color-text-subtle)]">{sub}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Range diagnostics */}
+            <div className="grid grid-cols-3 gap-3">
+              {rangeStats.map(({ label, count, pnl, avgEv, expWins }) => (
+                <div key={label} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-3">
+                  <div className="text-xs font-semibold text-[var(--color-text-primary)]">{label}% EV</div>
+                  <div className="grid grid-cols-2 gap-y-2.5 text-[11px]">
+                    <div>
+                      <div className="text-[var(--color-text-subtle)]">Bets</div>
+                      <div className="font-mono font-semibold text-[var(--color-text-primary)]">{count || "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-[var(--color-text-subtle)]">Exp Wins</div>
+                      <div className="font-mono font-semibold text-[var(--color-text-primary)]">
+                        {expWins > 0 ? expWins.toFixed(2) : "—"}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[var(--color-text-subtle)]">Avg EV</div>
+                      <div className="font-mono font-semibold text-[var(--color-text-primary)]">
+                        {avgEv != null ? `${(avgEv * 100).toFixed(1)}%` : "—"}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[var(--color-text-subtle)]">P&L</div>
+                      <div className={cn("font-mono font-semibold",
+                        count === 0 ? "text-[var(--color-text-subtle)]"
+                        : pnl >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"
+                      )}>
+                        {count > 0 ? `${pnl >= 0 ? "+" : ""}${formatCurrency(pnl)}` : "—"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* ── Bet Log ───────────────────────────────────────────────────────────── */}

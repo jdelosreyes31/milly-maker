@@ -10,7 +10,7 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.52.0",
+    "@anthropic-ai/sdk": "^0.104.1",
     "@duckdb/duckdb-wasm": "^1.29.0",
     "@milly-maker/finance-engine": "workspace:*",
     "@milly-maker/ui": "workspace:*",

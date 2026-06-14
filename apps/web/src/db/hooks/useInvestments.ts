@@ -16,6 +16,9 @@ import {
   insertContribution,
   deleteContribution,
   insertHoldingLot,
+  deleteHoldingLot,
+  updateHoldingLot,
+  recomputeHoldingFromLots,
   upsertNetWorthSnapshot,
 } from "../queries/investments.js";
 
@@ -133,6 +136,30 @@ export function useInvestments() {
     [conn, refresh]
   );
 
+  const removeLot = useCallback(
+    async (id: string) => {
+      if (!conn) return;
+      const holdingId = lots.find((l) => l.id === id)?.holding_id;
+      await deleteHoldingLot(conn, id);
+      if (holdingId) await recomputeHoldingFromLots(conn, holdingId);
+      await upsertNetWorthSnapshot(conn);
+      await refresh();
+    },
+    [conn, lots, refresh]
+  );
+
+  const editLot = useCallback(
+    async (data: Parameters<typeof updateHoldingLot>[1]) => {
+      if (!conn) return;
+      const holdingId = lots.find((l) => l.id === data.id)?.holding_id;
+      await updateHoldingLot(conn, data);
+      if (holdingId) await recomputeHoldingFromLots(conn, holdingId);
+      await upsertNetWorthSnapshot(conn);
+      await refresh();
+    },
+    [conn, lots, refresh]
+  );
+
   const sellHolding = useCallback(
     async (id: string) => {
       if (!conn) return;
@@ -159,7 +186,7 @@ export function useInvestments() {
     add, edit, remove,
     addOrEditHolding, removeHolding, sellHolding,
     addContribution, removeContribution,
-    addHoldingLot,
+    addHoldingLot, removeLot, editLot,
     totalValue, totalMonthlyContribution, totalHoldings,
   };
 }

@@ -439,6 +439,7 @@ export async function insertHoldingLot(
     investment_id: string;
     shares: number;
     price_per_share: number;
+    lot_cost?: number;        // optional override; defaults to shares * price_per_share
     purchased_at: string;
     notes: string | null;
     transaction_type?: "buy" | "sell";
@@ -453,7 +454,7 @@ export async function insertHoldingLot(
             '${data.purchased_at}', ${notes}, '${txType}')
   `);
   if (txType === "buy") {
-    const lotCost = data.shares * data.price_per_share;
+    const lotCost = data.lot_cost ?? data.shares * data.price_per_share;
     await conn.query(`
       UPDATE investment_holdings SET
         shares     = COALESCE(shares, 0) + ${data.shares},
@@ -463,6 +464,343 @@ export async function insertHoldingLot(
     `);
     await syncHoldingsTotals(conn, data.investment_id);
   }
+}
+
+export async function deleteHoldingLot(
+  conn: AsyncDuckDBConnection,
+  lotId: string
+): Promise<void> {
+  await conn.query(`DELETE FROM holding_lots WHERE id = '${lotId}'`);
+}
+
+export async function updateHoldingLot(
+  conn: AsyncDuckDBConnection,
+  data: {
+    id: string;
+    shares: number;
+    price_per_share: number;
+    purchased_at: string;
+    transaction_type: "buy" | "sell";
+  }
+): Promise<void> {
+  await conn.query(`
+    UPDATE holding_lots SET
+      shares          = ${data.shares},
+      price_per_share = ${data.price_per_share},
+      purchased_at    = '${data.purchased_at}',
+      transaction_type = '${data.transaction_type}'
+    WHERE id = '${data.id}'
+  `);
+}
+
+/**
+ * Recompute a holding's shares / cost_basis / current_value by replaying every
+ * lot for that holding in chronological order using avg-cost accounting.
+ *
+ * Buys add shares and cost (shares × price). Sells remove shares and reduce the
+ * cost basis by the average cost per share. current_value is set to the
+ * remaining shares valued at the most recent transaction's price per share —
+ * matching the convention used when lots are first imported. The holding is
+ * marked sold when no shares remain. Account totals are re-synced afterward.
+ *
+ * Call this after editing or deleting a lot so both the overview and actual
+ * views (which read the same holdings table) reflect the change.
+ */
+export async function recomputeHoldingFromLots(
+  conn: AsyncDuckDBConnection,
+  holdingId: string
+): Promise<void> {
+  // Resolve the owning account
+  const ownerRes = await conn.query(`
+    SELECT investment_id FROM investment_holdings WHERE id = '${holdingId}'
+  `);
+  const owner = ownerRes.toArray()[0] as { investment_id: string } | undefined;
+  if (!owner) return;
+
+  // Replay lots oldest → newest
+  const lotsRes = await conn.query(`
+    SELECT shares::DOUBLE AS shares,
+           price_per_share::DOUBLE AS price_per_share,
+           COALESCE(transaction_type, 'buy') AS transaction_type
+    FROM holding_lots
+    WHERE holding_id = '${holdingId}'
+    ORDER BY purchased_at ASC, created_at ASC
+  `);
+  const lots = lotsRes.toArray() as {
+    shares: number; price_per_share: number; transaction_type: string;
+  }[];
+
+  let shares = 0;
+  let costBasis = 0;
+  let lastPrice = 0;
+
+  for (const lot of lots) {
+    if (lot.transaction_type === "sell") {
+      const avgCost = shares > 0 ? costBasis / shares : 0;
+      costBasis = Math.max(0, costBasis - lot.shares * avgCost);
+      shares = Math.max(0, shares - lot.shares);
+    } else {
+      costBasis += lot.shares * lot.price_per_share;
+      shares += lot.shares;
+    }
+    lastPrice = lot.price_per_share;
+  }
+
+  shares = Math.max(0, shares);
+  costBasis = Math.max(0, costBasis);
+  const currentValue = shares * lastPrice;
+  const isSold = shares <= 0.000001;
+
+  await conn.query(`
+    UPDATE investment_holdings SET
+      shares        = ${shares},
+      cost_basis    = ${costBasis},
+      current_value = ${currentValue},
+      is_sold       = ${isSold ? "TRUE" : "FALSE"},
+      updated_at    = now()
+    WHERE id = '${holdingId}'
+  `);
+
+  await syncHoldingsTotals(conn, owner.investment_id);
+}
+
+// ── Account Overwrite ─────────────────────────────────────────────────────────
+
+/**
+ * Wipe all lots, contributions, and holdings for an investment account
+ * so the trade log can be replayed from scratch.
+ */
+export async function clearAccountForOverwrite(
+  conn: AsyncDuckDBConnection,
+  investmentId: string
+): Promise<void> {
+  // Delete all lots belonging to this account's holdings
+  await conn.query(`
+    DELETE FROM holding_lots
+    WHERE holding_id IN (
+      SELECT id FROM investment_holdings WHERE investment_id = '${investmentId}'
+    )
+  `);
+  // Delete all holdings
+  await conn.query(`DELETE FROM investment_holdings WHERE investment_id = '${investmentId}'`);
+  // Delete all contributions
+  await conn.query(`DELETE FROM investment_contributions WHERE investment_id = '${investmentId}'`);
+  // Zero out the account totals
+  await conn.query(`
+    UPDATE investments
+    SET current_value = 0, cost_basis = 0, updated_at = now()
+    WHERE id = '${investmentId}'
+  `);
+}
+
+// ── Sell Lot ──────────────────────────────────────────────────────────────────
+
+/**
+ * Record a partial or full sell of an existing holding.
+ * - Inserts a lot with transaction_type='sell'
+ * - Decreases holding shares by soldShares (avg-cost basis reduction)
+ * - Marks holding is_sold=true if shares reach 0
+ * - Does NOT use the "mark whole holding sold" path (that zeroes current_value)
+ */
+export async function processSellLot(
+  conn: AsyncDuckDBConnection,
+  data: {
+    holding_id: string;
+    investment_id: string;
+    shares: number;
+    price_per_share: number;
+    total?: number;           // optional confirmed proceeds; defaults to shares * price_per_share
+    transacted_at: string;
+    notes: string | null;
+  }
+): Promise<void> {
+  const id = nanoid();
+  const notes = data.notes ? `'${esc(data.notes)}'` : "NULL";
+
+  // Insert the sell lot
+  await conn.query(`
+    INSERT INTO holding_lots (id, holding_id, shares, price_per_share, purchased_at, notes, transaction_type)
+    VALUES ('${id}', '${data.holding_id}', ${data.shares}, ${data.price_per_share},
+            '${data.transacted_at}', ${notes}, 'sell')
+  `);
+
+  // Fetch current holding state
+  const holdingRes = await conn.query(`
+    SELECT shares::DOUBLE AS shares, cost_basis::DOUBLE AS cost_basis
+    FROM investment_holdings WHERE id = '${data.holding_id}'
+  `);
+  const holding = holdingRes.toArray()[0] as { shares: number; cost_basis: number } | undefined;
+  if (!holding) return;
+
+  const prevShares = holding.shares ?? 0;
+  const prevCostBasis = holding.cost_basis ?? 0;
+  const remainingShares = Math.max(0, prevShares - data.shares);
+
+  // Use confirmed total if provided, otherwise fall back to shares * price
+  const effectivePricePerShare = (data.total != null && data.shares > 0)
+    ? data.total / data.shares
+    : data.price_per_share;
+
+  // Avg-cost basis reduction
+  const costPerShare = prevShares > 0 ? prevCostBasis / prevShares : 0;
+  const newCostBasis = Math.max(0, remainingShares * costPerShare);
+  const newCurrentValue = remainingShares * effectivePricePerShare;
+  const isSold = remainingShares <= 0.000001;
+
+  await conn.query(`
+    UPDATE investment_holdings SET
+      shares        = ${remainingShares},
+      cost_basis    = ${newCostBasis},
+      current_value = ${newCurrentValue},
+      is_sold       = ${isSold ? "TRUE" : "FALSE"},
+      updated_at    = now()
+    WHERE id = '${data.holding_id}'
+  `);
+
+  await syncHoldingsTotals(conn, data.investment_id);
+}
+
+// ── Batch Trade Log ───────────────────────────────────────────────────────────
+
+import type { TradeEntry } from "../../lib/tradeLogParser.js";
+
+export interface TradeLogResult {
+  index: number;
+  raw: string;
+  status: "ok" | "error" | "skipped";
+  message?: string;
+}
+
+/**
+ * Process a parsed trade log against a specific investment account.
+ * Returns a result per entry. Rolls back nothing on partial failure —
+ * each entry is independent so the caller can surface errors to the user.
+ */
+export async function batchProcessTradeLog(
+  conn: AsyncDuckDBConnection,
+  investmentId: string,
+  entries: TradeEntry[],
+  overwrite: boolean
+): Promise<TradeLogResult[]> {
+  const results: TradeLogResult[] = [];
+
+  if (overwrite) {
+    await clearAccountForOverwrite(conn, investmentId);
+  }
+
+  // Load current holdings for this account (ticker → holding)
+  const holdingRes = await conn.query(`
+    SELECT id, ticker, shares::DOUBLE AS shares, cost_basis::DOUBLE AS cost_basis, name
+    FROM investment_holdings
+    WHERE investment_id = '${investmentId}' AND COALESCE(is_sold, FALSE) = FALSE
+  `);
+  const holdingRows = holdingRes.toArray() as { id: string; ticker: string | null; shares: number; cost_basis: number; name: string }[];
+  const holdingByTicker = new Map(
+    holdingRows.filter((h) => h.ticker).map((h) => [h.ticker!.toUpperCase(), h])
+  );
+
+  let i = 0;
+  for (const entry of entries) {
+    const idx = i++;
+
+    if (entry.type === "unknown") {
+      results.push({ index: idx, raw: entry.raw, status: "skipped", message: entry.error });
+      continue;
+    }
+
+    try {
+      if (entry.type === "deposit") {
+        await insertContribution(conn, {
+          investment_id: investmentId,
+          amount: entry.amount,
+          contribution_date: entry.date,
+          source_type: "other",
+          source_account_id: null,
+          notes: entry.description ? `Deposit – ${entry.description}` : null,
+          update_account_value: true,
+        });
+        results.push({ index: idx, raw: entry.raw, status: "ok" });
+
+      } else if (entry.type === "buy") {
+        let holding = holdingByTicker.get(entry.ticker);
+        if (!holding) {
+          const hid = await upsertHolding(conn, {
+            investment_id: investmentId,
+            name: entry.ticker,
+            ticker: entry.ticker,
+            shares: 0,
+            current_value: 0,
+            cost_basis: 0,
+            asset_class: "stocks",
+          });
+          holding = { id: hid, ticker: entry.ticker, shares: 0, cost_basis: 0, name: entry.ticker };
+          holdingByTicker.set(entry.ticker, holding);
+        }
+        await insertHoldingLot(conn, {
+          holding_id: holding.id,
+          investment_id: investmentId,
+          shares: entry.shares,
+          price_per_share: entry.price,
+          lot_cost: entry.total,
+          purchased_at: entry.date,
+          notes: null,
+          transaction_type: "buy",
+        });
+        // Update in-memory cache so subsequent sells in the same batch see updated shares
+        const cached = holdingByTicker.get(entry.ticker);
+        if (cached) {
+          cached.shares = (cached.shares ?? 0) + entry.shares;
+          cached.cost_basis = (cached.cost_basis ?? 0) + entry.total;
+        }
+        // Sync current_value using the confirmed total
+        const pricePerShare = entry.shares > 0 ? entry.total / entry.shares : entry.price;
+        await conn.query(`
+          UPDATE investment_holdings
+          SET current_value = shares * ${pricePerShare}, updated_at = now()
+          WHERE id = '${holding.id}'
+        `);
+        results.push({ index: idx, raw: entry.raw, status: "ok" });
+
+      } else if (entry.type === "sell") {
+        const holding = holdingByTicker.get(entry.ticker);
+        if (!holding) {
+          results.push({
+            index: idx, raw: entry.raw, status: "error",
+            message: `No holding found for ticker "${entry.ticker}". Add a buy first.`,
+          });
+          continue;
+        }
+        await processSellLot(conn, {
+          holding_id: holding.id,
+          investment_id: investmentId,
+          shares: entry.shares,
+          price_per_share: entry.price,
+          total: entry.total,
+          transacted_at: entry.date,
+          notes: null,
+        });
+        holding.shares = Math.max(0, holding.shares - entry.shares);
+        results.push({ index: idx, raw: entry.raw, status: "ok" });
+
+      } else if (entry.type === "dividend") {
+        // Dividends are investment income, not contributions — update account value directly
+        await conn.query(`
+          UPDATE investments
+          SET current_value = current_value + ${entry.amount}, updated_at = now()
+          WHERE id = '${investmentId}'
+        `);
+        results.push({ index: idx, raw: entry.raw, status: "ok" });
+      }
+    } catch (err) {
+      results.push({
+        index: idx, raw: entry.raw, status: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  await upsertNetWorthSnapshot(conn);
+  return results;
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

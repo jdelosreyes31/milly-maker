@@ -53,7 +53,7 @@ export function AssistantPanel() {
       <div className="flex h-14 items-center justify-between border-b border-[var(--color-border)] px-4">
         <div className="flex items-center gap-2">
           <Bot size={16} className="text-[var(--color-primary)]" />
-          <span className="text-sm font-semibold">claude-opus-4-6</span>
+          <span className="text-sm font-semibold">claude-opus-4-8</span>
         </div>
         <div className="flex items-center gap-1">
           {messages.length > 0 && (

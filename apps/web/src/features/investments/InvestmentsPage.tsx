@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { Plus, Trash2, Pencil, TrendingUp, ChevronDown, ChevronRight, Landmark, RefreshCw, ArrowLeftRight } from "lucide-react";
+import { Plus, Trash2, Pencil, TrendingUp, ChevronDown, ChevronRight, Landmark, RefreshCw, ArrowLeftRight, ClipboardList } from "lucide-react";
 import {
   Button, Card, CardContent, CardHeader, CardTitle,
   Dialog, Input, Select, StatCard, Badge, formatCurrency, formatPercent,
@@ -21,7 +21,9 @@ import { fetchPrevDayClose } from "@/lib/massiveApi.js";
 import { InvestmentPlanningView } from "./InvestmentPlanningView.js";
 import { InvestmentForecastView } from "./InvestmentForecastView.js";
 import { InvestmentActualView } from "./InvestmentActualView.js";
-import { InvestmentCoastFireView } from "./InvestmentCoastFireView.js";
+import { RetirementStrategiesView } from "./RetirementStrategiesView.js";
+import { TradeLogScaffold } from "./TradeLogScaffold.js";
+import { PortfolioAnalysis } from "./PortfolioAnalysis.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -94,11 +96,11 @@ const emptyContrib = (investmentId = ""): ContribForm => ({
 export function InvestmentsPage() {
   const { conn } = useDb();
   const {
-    investments, holdings, soldHoldings, contributions, lots, loading,
-    holdingsByAccount, add, edit, remove,
+    investments, holdings, soldHoldings, contributions, lots, loading, refresh,
+    holdingsByAccount, lotsByHolding, add, edit, remove,
     addOrEditHolding, removeHolding, sellHolding,
     addContribution, removeContribution,
-    addHoldingLot,
+    addHoldingLot, removeLot, editLot,
     totalValue, totalMonthlyContribution, totalHoldings,
   } = useInvestments();
 
@@ -138,6 +140,7 @@ export function InvestmentsPage() {
   const [saving, setSaving] = useState(false);
   const [fetchingPrice, setFetchingPrice] = useState<Set<string>>(new Set());
   const [fetchPriceDialog, setFetchPriceDialog] = useState(false);
+  const [tradeLogOpen, setTradeLogOpen] = useState(false);
   const [fetchResults, setFetchResults] = useState<Record<string, { status: "pending" | "done" | "error"; price: number | null }>>({});
 
   type TxType = "buy" | "sell_amount" | "sell_shares" | "sell_all";
@@ -157,8 +160,16 @@ export function InvestmentsPage() {
   const [txNewPrice, setTxNewPrice] = useState("");
   const [txPrice, setTxPrice] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [expandedHoldings, setExpandedHoldings] = useState<Set<string>>(new Set());
+  function toggleHolding(id: string) {
+    setExpandedHoldings((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
   const [showAllContribs, setShowAllContribs] = useState(false);
-  const [view, setView] = useState<"overview" | "planning" | "forecast" | "actual" | "coast">("overview");
+  const [view, setView] = useState<"overview" | "planning" | "forecast" | "actual" | "retirement">("overview");
 
   // ── Projection ───────────────────────────────────────────────────────────
   const [projYears, setProjYears] = useState("30");
@@ -495,6 +506,9 @@ export function InvestmentsPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Investments</h1>
         <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => setTradeLogOpen(true)}>
+            <ClipboardList size={14} /> Trade Log
+          </Button>
           <Button variant="outline" size="sm" onClick={() => { setTxHolding(null); setTxType("buy"); setTxAmount(""); setTxShares(""); setTxError(""); setTxIsNew(false); setTxNewName(""); setTxNewTicker(""); setTxNewAssetClass("stocks"); setTxNewInvestmentId(investments[0]?.id ?? ""); setTxNewShares(""); setTxNewPrice(""); setTxDialog(true); }}>
             <ArrowLeftRight size={14} /> Log Transaction
           </Button>
@@ -559,14 +573,14 @@ export function InvestmentsPage() {
           Actual
         </button>
         <button
-          onClick={() => setView("coast")}
+          onClick={() => setView("retirement")}
           className={`rounded-[var(--radius-sm)] px-4 py-1.5 text-sm font-medium transition-colors ${
-            view === "coast"
+            view === "retirement"
               ? "bg-[var(--color-primary)] text-white"
               : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-raised)]"
           }`}
         >
-          Coast FIRE
+          Retirement
         </button>
       </div>
 
@@ -623,7 +637,7 @@ export function InvestmentsPage() {
                     </div>
                     <div className="text-right shrink-0">
                       <p className="font-semibold tabular-nums text-[var(--color-success)]">
-                        {formatCurrency(inv.current_value, true)}
+                        {formatCurrency(inv.current_value)}
                       </p>
                       {gain !== 0 && (
                         <p className={`text-xs tabular-nums ${gain >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}`}>
@@ -674,11 +688,24 @@ export function InvestmentsPage() {
                             {acctHoldings.map((h) => {
                               const alloc = holdingsTotal > 0 ? (h.current_value / holdingsTotal) * 100 : 0;
                               const gain = h.current_value - h.cost_basis;
+                              const hLots = lotsByHolding(h.id);
+                              const hExpanded = expandedHoldings.has(h.id);
                               return (
-                                <tr key={h.id} className="group">
+                                <React.Fragment key={h.id}>
+                                <tr
+                                  className="group cursor-pointer hover:bg-[var(--color-surface-raised)]/50"
+                                  onClick={() => { if (hLots.length > 0) toggleHolding(h.id); }}
+                                >
                                   <td className="px-4 py-2">
-                                    <p className="font-medium">{h.name}</p>
-                                    {h.ticker && <p className="text-xs text-[var(--color-text-muted)] font-mono">{h.ticker}</p>}
+                                    <div className="flex items-center gap-1.5">
+                                      {hLots.length > 0 && (
+                                        <ChevronRight size={12} className={`text-[var(--color-text-muted)] transition-transform shrink-0 ${hExpanded ? "rotate-90" : ""}`} />
+                                      )}
+                                      <div>
+                                        <p className="font-medium">{h.name}</p>
+                                        {h.ticker && <p className="text-xs text-[var(--color-text-muted)] font-mono">{h.ticker}</p>}
+                                      </div>
+                                    </div>
                                   </td>
                                   <td className="py-2">
                                     <span
@@ -700,7 +727,7 @@ export function InvestmentsPage() {
                                     )}
                                   </td>
                                   <td className="py-2 text-right tabular-nums font-medium">
-                                    <p>{formatCurrency(h.current_value, true)}</p>
+                                    <p>{formatCurrency(h.current_value)}</p>
                                     {h.cost_basis > 0 && (
                                       <p className={`text-[10px] tabular-nums ${gain >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}`}>
                                         {gain >= 0 ? "+" : ""}{formatCurrency(gain)}
@@ -710,7 +737,75 @@ export function InvestmentsPage() {
                                   <td className="py-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
                                     {h.cost_basis > 0 ? formatCurrency(h.cost_basis) : "—"}
                                   </td>
+                                  <td className="py-2 pr-2 text-right" onClick={(e) => e.stopPropagation()}>
+                                    <div className="flex items-center justify-end gap-1">
+                                      <button
+                                        onClick={() => openEditHolding(h)}
+                                        className="opacity-0 group-hover:opacity-100 transition-opacity rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-raised)] hover:text-[var(--color-text)]"
+                                        title="Edit holding"
+                                      >
+                                        <Pencil size={13} />
+                                      </button>
+                                      <button
+                                        onClick={() => {
+                                          if (confirm(`Close position in ${h.name}? This will zero out shares, value, and cost basis and mark it as sold.`)) {
+                                            void sellHolding(h.id);
+                                          }
+                                        }}
+                                        className="opacity-0 group-hover:opacity-100 transition-opacity rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)] border border-[var(--color-danger)]/30 hover:bg-[var(--color-danger)]/10"
+                                        title="Close position — zero out and mark sold"
+                                      >
+                                        Close
+                                      </button>
+                                    </div>
+                                  </td>
                                 </tr>
+                                {hExpanded && hLots.length > 0 && (
+                                  <tr>
+                                    <td colSpan={7} className="pb-2 px-4">
+                                      <table className="w-full text-xs border border-[var(--color-border-subtle)] rounded-lg overflow-hidden">
+                                        <thead>
+                                          <tr className="bg-[var(--color-surface)] text-[var(--color-text-muted)] text-left">
+                                            <th className="px-3 py-1.5">Date</th>
+                                            <th className="px-3 py-1.5 text-right">Type</th>
+                                            <th className="px-3 py-1.5 text-right">Shares</th>
+                                            <th className="px-3 py-1.5 text-right">Price / sh</th>
+                                            <th className="px-3 py-1.5 text-right">Total</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-[var(--color-border-subtle)]">
+                                          {[...hLots]
+                                            .sort((a, b) => b.purchased_at.localeCompare(a.purchased_at))
+                                            .map((lot) => {
+                                              const isSell = lot.transaction_type === "sell";
+                                              return (
+                                                <tr key={lot.id} className="bg-[var(--color-surface-raised)]/40">
+                                                  <td className="px-3 py-1.5 tabular-nums text-[var(--color-text-muted)]">
+                                                    {new Date(lot.purchased_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                                                  </td>
+                                                  <td className="px-3 py-1.5 text-right">
+                                                    <span className={`font-medium px-1.5 py-0.5 rounded text-[10px] ${isSell ? "bg-[var(--color-danger)]/10 text-[var(--color-danger)]" : "bg-[var(--color-success)]/10 text-[var(--color-success)]"}`}>
+                                                      {isSell ? "Sell" : "Buy"}
+                                                    </span>
+                                                  </td>
+                                                  <td className="px-3 py-1.5 text-right tabular-nums">
+                                                    {lot.shares.toLocaleString(undefined, { maximumFractionDigits: 6 })}
+                                                  </td>
+                                                  <td className="px-3 py-1.5 text-right tabular-nums text-[var(--color-text-muted)]">
+                                                    ${lot.price_per_share.toFixed(2)}
+                                                  </td>
+                                                  <td className={`px-3 py-1.5 text-right tabular-nums font-semibold ${isSell ? "text-[var(--color-success)]" : ""}`}>
+                                                    {isSell ? "+" : ""}${(lot.shares * lot.price_per_share).toFixed(2)}
+                                                  </td>
+                                                </tr>
+                                              );
+                                            })}
+                                        </tbody>
+                                      </table>
+                                    </td>
+                                  </tr>
+                                )}
+                                </React.Fragment>
                               );
                             })}
                           </tbody>
@@ -719,7 +814,7 @@ export function InvestmentsPage() {
                               <tr className="border-t border-[var(--color-border)]">
                                 <td colSpan={4} className="px-4 py-2 text-xs text-[var(--color-text-muted)]">Total</td>
                                 <td className="py-2 text-right tabular-nums text-sm font-semibold text-[var(--color-success)]">
-                                  {formatCurrency(holdingsTotal, true)}
+                                  {formatCurrency(holdingsTotal)}
                                 </td>
                                 <td className="py-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
                                   {formatCurrency(acctHoldings.reduce((s, h) => s + h.cost_basis, 0))}
@@ -825,7 +920,9 @@ export function InvestmentsPage() {
                     <td className="py-2 text-[var(--color-text-muted)]">
                       {c.source_account_name
                         ? c.source_account_name
-                        : CONTRIBUTION_SOURCE_TYPES.find((s) => s.value === c.source_type)?.label ?? c.source_type}
+                        : c.source_type === "dividend"
+                          ? "Dividend"
+                          : CONTRIBUTION_SOURCE_TYPES.find((s) => s.value === c.source_type)?.label ?? c.source_type}
                       {c.notes && <span className="ml-1 text-[var(--color-text-subtle)]">· {c.notes}</span>}
                     </td>
                     <td className="py-2 text-right tabular-nums font-semibold text-[var(--color-success)]">
@@ -894,6 +991,21 @@ export function InvestmentsPage() {
         </Card>
       )}
 
+      {(lots.length > 0 || holdings.length > 0) && (
+        <Card>
+          <CardContent className="pt-5">
+            <PortfolioAnalysis
+              holdings={holdings}
+              soldHoldings={soldHoldings}
+              investments={investments}
+              lots={lots}
+              contributions={contributions}
+              totalValue={totalValue}
+            />
+          </CardContent>
+        </Card>
+      )}
+
       </>)}
       {view === "planning" && (
         <InvestmentPlanningView
@@ -922,11 +1034,13 @@ export function InvestmentsPage() {
           lots={lots}
           contributions={contributions}
           totalValue={totalValue}
+          onDeleteLot={(id) => { void removeLot(id); }}
+          onEditLot={(data) => { void editLot(data); }}
         />
       )}
 
-      {view === "coast" && (
-        <InvestmentCoastFireView
+      {view === "retirement" && (
+        <RetirementStrategiesView
           totalValue={totalValue}
           totalMonthlyContribution={totalMonthlyContribution}
           weightedAnnualReturn={weightedAnnualReturn}
@@ -1280,6 +1394,13 @@ export function InvestmentsPage() {
           </div>
         </div>
       </Dialog>
+
+      <TradeLogScaffold
+        open={tradeLogOpen}
+        onClose={() => setTradeLogOpen(false)}
+        investments={investments}
+        onDone={() => { void refresh(); }}
+      />
     </div>
   );
 }

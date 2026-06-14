@@ -1,9 +1,10 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle, formatCurrency } from "@milly-maker/ui";
+import { Trash2, Pencil, Check, X } from "lucide-react";
 import type { Investment, InvestmentHolding, HoldingLot, InvestmentContribution } from "@/db/queries/investments.js";
 import { ASSET_CLASSES } from "@/db/queries/investments.js";
 
@@ -29,6 +30,21 @@ interface Props {
   lots: HoldingLot[];
   contributions: InvestmentContribution[];
   totalValue: number;
+  onDeleteLot?: (id: string) => void;
+  onEditLot?: (data: {
+    id: string;
+    shares: number;
+    price_per_share: number;
+    purchased_at: string;
+    transaction_type: "buy" | "sell";
+  }) => void;
+}
+
+interface LotEditState {
+  shares: string;
+  price: string;
+  date: string;
+  type: "buy" | "sell";
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -59,7 +75,30 @@ function daysSince(iso: string) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function InvestmentActualView({ holdings, soldHoldings, investments, lots, contributions, totalValue }: Props) {
+export function InvestmentActualView({ holdings, soldHoldings, investments, lots, contributions, totalValue, onDeleteLot, onEditLot }: Props) {
+  const [editingLotId, setEditingLotId] = useState<string | null>(null);
+  const [lotEdit, setLotEdit] = useState<LotEditState>({ shares: "", price: "", date: "", type: "buy" });
+
+  function startEditLot(lot: HoldingLot) {
+    setEditingLotId(lot.id);
+    setLotEdit({
+      shares: String(lot.shares),
+      price: String(lot.price_per_share),
+      date: lot.purchased_at.slice(0, 10),
+      type: lot.transaction_type === "sell" ? "sell" : "buy",
+    });
+  }
+  function cancelEditLot() {
+    setEditingLotId(null);
+  }
+  function saveEditLot(id: string) {
+    const shares = Number(lotEdit.shares);
+    const price = Number(lotEdit.price);
+    if (!Number.isFinite(shares) || shares <= 0 || !Number.isFinite(price) || price < 0 || !lotEdit.date) return;
+    onEditLot?.({ id, shares, price_per_share: price, purchased_at: lotEdit.date, transaction_type: lotEdit.type });
+    setEditingLotId(null);
+  }
+
   const totalCostBasis = holdings.reduce((s, h) => s + h.cost_basis, 0);
   const totalPnL = totalValue - totalCostBasis;
   const totalReturn = totalCostBasis > 0 ? (totalPnL / totalCostBasis) * 100 : 0;
@@ -489,6 +528,7 @@ export function InvestmentActualView({ holdings, soldHoldings, investments, lots
                 <tr className="border-b border-[var(--color-border)] text-xs text-[var(--color-text-muted)] text-left">
                   <th className="pb-2">Holding</th>
                   <th className="pb-2">Class</th>
+                  <th className="pb-2 text-right">Shares</th>
                   <th className="pb-2 text-right">Cost Basis</th>
                   <th className="pb-2 text-right">Value</th>
                   <th className="pb-2 text-right">P&amp;L</th>
@@ -511,14 +551,17 @@ export function InvestmentActualView({ holdings, soldHoldings, investments, lots
                         {ASSET_CLASSES.find(a => a.value === h.asset_class)?.label ?? h.asset_class}
                       </span>
                     </td>
+                    <td className="py-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
+                      {h.shares != null ? h.shares.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 }) : "—"}
+                    </td>
                     <td className="py-2 text-right tabular-nums text-[var(--color-text-muted)]">
-                      {h.cost_basis > 0 ? formatCurrency(h.cost_basis) : "—"}
+                      {h.cost_basis > 0 ? `$${h.cost_basis.toFixed(2)}` : "—"}
                     </td>
                     <td className="py-2 text-right tabular-nums font-semibold">
-                      {formatCurrency(h.current_value, true)}
+                      ${h.current_value.toFixed(2)}
                     </td>
                     <td className={`py-2 text-right tabular-nums font-semibold ${h.pnl >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}`}>
-                      {h.cost_basis > 0 ? `${h.pnl >= 0 ? "+" : ""}${formatCurrency(h.pnl)}` : "—"}
+                      {h.cost_basis > 0 ? `${h.pnl >= 0 ? "+" : ""}$${h.pnl.toFixed(2)}` : "—"}
                     </td>
                     <td className={`py-2 text-right tabular-nums text-xs font-semibold ${h.ret >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}`}>
                       {h.cost_basis > 0 ? `${h.ret >= 0 ? "+" : ""}${h.ret.toFixed(2)}%` : "—"}
@@ -530,14 +573,15 @@ export function InvestmentActualView({ holdings, soldHoldings, investments, lots
                 <tfoot>
                   <tr className="border-t border-[var(--color-border)]">
                     <td colSpan={2} className="pt-2 text-xs text-[var(--color-text-muted)]">Total</td>
+                    <td className="pt-2" />
                     <td className="pt-2 text-right tabular-nums text-xs text-[var(--color-text-muted)]">
-                      {formatCurrency(totalCostBasis)}
+                      ${totalCostBasis.toFixed(2)}
                     </td>
                     <td className="pt-2 text-right tabular-nums text-sm font-semibold text-[var(--color-success)]">
-                      {formatCurrency(totalValue, true)}
+                      ${totalValue.toFixed(2)}
                     </td>
                     <td className={`pt-2 text-right tabular-nums text-sm font-semibold ${totalPnL >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}`}>
-                      {totalPnL >= 0 ? "+" : ""}{formatCurrency(totalPnL)}
+                      {totalPnL >= 0 ? "+" : ""}${totalPnL.toFixed(2)}
                     </td>
                     <td className={`pt-2 text-right tabular-nums text-xs font-semibold ${totalReturn >= 0 ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}`}>
                       {totalReturn >= 0 ? "+" : ""}{totalReturn.toFixed(2)}%
@@ -617,6 +661,7 @@ export function InvestmentActualView({ holdings, soldHoldings, investments, lots
                   <th className="pb-2 text-right">Shares</th>
                   <th className="pb-2 text-right">Price / sh</th>
                   <th className="pb-2 text-right">Total</th>
+                  {(onDeleteLot || onEditLot) && <th className="pb-2 w-16" />}
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-border-subtle)]">
@@ -625,8 +670,84 @@ export function InvestmentActualView({ holdings, soldHoldings, investments, lots
                   .map(lot => {
                     const holding = holdings.find(h => h.id === lot.holding_id);
                     const isSell = lot.transaction_type === "sell";
+                    const isEditing = editingLotId === lot.id;
+                    const showActions = onDeleteLot || onEditLot;
+
+                    if (isEditing) {
+                      const editShares = Number(lotEdit.shares);
+                      const editPrice = Number(lotEdit.price);
+                      const editTotal = (Number.isFinite(editShares) ? editShares : 0) * (Number.isFinite(editPrice) ? editPrice : 0);
+                      return (
+                        <tr key={lot.id} className="bg-[var(--color-surface-raised)]/40">
+                          <td className="py-2 pr-2">
+                            <input
+                              type="date"
+                              value={lotEdit.date}
+                              onChange={e => setLotEdit(s => ({ ...s, date: e.target.value }))}
+                              className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs tabular-nums"
+                            />
+                          </td>
+                          <td className="py-2">
+                            <p className="font-medium">{holding?.name ?? "—"}</p>
+                            {holding?.ticker && <p className="text-xs font-mono text-[var(--color-text-muted)]">{holding.ticker}</p>}
+                          </td>
+                          <td className="py-2 pl-2 text-right">
+                            <select
+                              value={lotEdit.type}
+                              onChange={e => setLotEdit(s => ({ ...s, type: e.target.value as "buy" | "sell" }))}
+                              className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs"
+                            >
+                              <option value="buy">Buy</option>
+                              <option value="sell">Sell</option>
+                            </select>
+                          </td>
+                          <td className="py-2 pl-2 text-right">
+                            <input
+                              type="number"
+                              step="any"
+                              value={lotEdit.shares}
+                              onChange={e => setLotEdit(s => ({ ...s, shares: e.target.value }))}
+                              className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs text-right tabular-nums"
+                            />
+                          </td>
+                          <td className="py-2 pl-2 text-right">
+                            <input
+                              type="number"
+                              step="any"
+                              value={lotEdit.price}
+                              onChange={e => setLotEdit(s => ({ ...s, price: e.target.value }))}
+                              className="w-24 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs text-right tabular-nums"
+                            />
+                          </td>
+                          <td className="py-2 text-right tabular-nums font-semibold text-[var(--color-text-muted)]">
+                            {formatCurrency(editTotal)}
+                          </td>
+                          {showActions && (
+                            <td className="py-2 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <button
+                                  onClick={() => saveEditLot(lot.id)}
+                                  className="rounded p-1 text-[var(--color-success)] hover:bg-[var(--color-success)]/10"
+                                  title="Save changes"
+                                >
+                                  <Check size={14} />
+                                </button>
+                                <button
+                                  onClick={cancelEditLot}
+                                  className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-text)]"
+                                  title="Cancel"
+                                >
+                                  <X size={14} />
+                                </button>
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    }
+
                     return (
-                      <tr key={lot.id}>
+                      <tr key={lot.id} className="group">
                         <td className="py-2 tabular-nums text-[var(--color-text-muted)]">
                           {new Date(lot.purchased_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
                         </td>
@@ -648,6 +769,34 @@ export function InvestmentActualView({ holdings, soldHoldings, investments, lots
                         <td className={`py-2 text-right tabular-nums font-semibold ${isSell ? "text-[var(--color-success)]" : ""}`}>
                           {isSell ? "+" : ""}{formatCurrency(lot.shares * lot.price_per_share)}
                         </td>
+                        {showActions && (
+                          <td className="py-2 text-right opacity-0 group-hover:opacity-100 transition-opacity">
+                            <div className="flex items-center justify-end gap-1">
+                              {onEditLot && (
+                                <button
+                                  onClick={() => startEditLot(lot)}
+                                  className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-text)]"
+                                  title="Edit transaction"
+                                >
+                                  <Pencil size={13} />
+                                </button>
+                              )}
+                              {onDeleteLot && (
+                                <button
+                                  onClick={() => {
+                                    if (confirm("Delete this transaction? The holding's shares, cost basis, and value will be recomputed from the remaining transactions.")) {
+                                      onDeleteLot(lot.id);
+                                    }
+                                  }}
+                                  className="rounded p-1 text-[var(--color-text-subtle)] hover:text-[var(--color-danger)]"
+                                  title="Delete transaction"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     );
                   })}

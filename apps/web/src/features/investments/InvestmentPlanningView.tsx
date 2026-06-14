@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Bot, AlertTriangle, Plus, Trash2, TrendingUp, Wallet, Users, BarChart3, Globe2, Zap, Download } from "lucide-react";
+import { AlertTriangle, Plus, Trash2, TrendingUp, Globe2 } from "lucide-react";
 import Anthropic from "@anthropic-ai/sdk";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -8,12 +8,13 @@ import { Link } from "@tanstack/react-router";
 import type { InvestmentHolding } from "@/db/queries/investments.js";
 import { ASSET_CLASSES } from "@/db/queries/investments.js";
 import { nanoid } from "@/lib/nanoid.js";
+import { StrategyIntake } from "./StrategyIntake.js";
 
 // ── Model options ─────────────────────────────────────────────────────────────
 
 const CLAUDE_MODELS = [
   { value: "claude-sonnet-4-5", label: "Sonnet", description: "Faster · recommended" },
-  { value: "claude-opus-4-6",   label: "Opus",   description: "Most capable · slower" },
+  { value: "claude-opus-4-8",   label: "Opus",   description: "Most capable · slower" },
 ] as const;
 
 type ClaudeModel = typeof CLAUDE_MODELS[number]["value"];
@@ -67,54 +68,20 @@ type PlanRow =
 
 interface PromptPayload { system: string; user: string }
 
-// ── Asset class expected return proxies (for Growth strategy weighting) ─────────
-
-const ASSET_CLASS_RETURNS: Record<string, number> = {
-  stocks:               0.10,
-  international_stocks: 0.09,
-  real_estate:          0.08,
-  crypto:               0.15,
-  commodities:          0.06,
-  bonds:                0.045,
-  cash:                 0.025,
-  other:                0.07,
-};
-
-// Below this dollar amount, splitting across multiple positions likely isn't worth it.
-const SINGLE_DUMP_THRESHOLD = 500;
-// Minimum meaningful allocation per position ($); below this, the split is too thin.
-const MIN_PER_POSITION = 50;
-
-// ── Deploy allocation result ──────────────────────────────────────────────────
-
-interface DeployAllocation {
-  id: string;
-  name: string;
-  ticker: string;
-  assetClass: string;
-  currentValue: number;
-  currentPct: number;
-  targetPct: number;
-  allocation: number;   // $ deployed here
-  sharePct: number;     // % of total cash
-  newValue: number;
-  newPct: number;
-  tag: "target-split" | "gap-fill" | "return-weighted" | "floor" | "skipped";
-}
-
-// ── Optimization result (computed from Claude's structured output) ─────────────
-
-interface OptimizationResult {
-  label: string;
-  summary: string;
-  adjustedItems: { id: string; name: string; ticker: string; targetPct: number }[];
-  quarterlySnapshots: { quarter: number; totalValue: number; weights: number[] }[];
-  convergedQuarter: number | null;
-  originalConvergedQuarter: number | null;
+// Turn an Anthropic SDK error into something diagnosable: the error class +
+// HTTP status. A 401/403 means the API key/billing; a connection error (no
+// status) means the request never completed (timeout / dropped / CORS) — not
+// the key. A 429 is a rate limit.
+function describeApiError(err: unknown): string {
+  if (err instanceof Anthropic.APIError) {
+    const status = typeof err.status === "number" ? `HTTP ${err.status}` : "no HTTP response (connection/timeout)";
+    return `${err.name} — ${status}: ${err.message}`;
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 function StreamingCard({
-  icon, title, content, streaming, error, endRef, promptPayload,
+  icon, title, content, streaming, error, endRef, promptPayload, status,
 }: {
   icon: React.ReactNode;
   title: string;
@@ -123,6 +90,7 @@ function StreamingCard({
   error: string | null;
   endRef: React.RefObject<HTMLDivElement | null>;
   promptPayload?: PromptPayload;
+  status?: string | null;
 }) {
   return (
     <div className="flex flex-col gap-2">
@@ -218,6 +186,12 @@ function StreamingCard({
                 <span className="animate-bounce [animation-delay:0.2s]">·</span>
               </span>
             )}
+            {streaming && status && (
+              <div className="mt-3 flex items-center gap-2 text-xs text-[var(--color-primary)]">
+                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-[var(--color-primary)]" />
+                <span>{status}</span>
+              </div>
+            )}
             <div ref={endRef} />
             {promptPayload && content && !streaming && (
               <details className="mt-4 border-t border-[var(--color-border-subtle)] pt-3">
@@ -264,7 +238,6 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
     () => loadStoredPlan().allocations
   );
   const [notes, setNotes] = useState<string>(() => loadStoredPlan().notes);
-  const [investStrategy, setInvestStrategy] = useState<"balance" | "rebalance" | "growth">("rebalance");
   const [model, setModel] = useState<ClaudeModel>(
     () => loadStoredPlan().model ?? "claude-sonnet-4-5"
   );
@@ -288,37 +261,15 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
   const [thesisNews, setThesisNews] = useState(""); // news used for the last run (for display)
   const thesisEndRef = useRef<HTMLDivElement>(null);
 
-  // "Invest with Claude" — deployment plan
+  // "Invest with Claude" — analyst deposit-allocation plan
+  const [buildoutMonths, setBuildoutMonths] = useState("3");
+  const [priceNotes, setPriceNotes] = useState("");
   const [investPlan, setInvestPlan] = useState("");
   const [analyzingPlan, setAnalyzingPlan] = useState(false);
   const [investPlanError, setInvestPlanError] = useState<string | null>(null);
   const [investPrompt, setInvestPrompt] = useState<PromptPayload | undefined>();
+  const [investActivity, setInvestActivity] = useState<string | null>(null);
   const investPlanEndRef = useRef<HTMLDivElement>(null);
-  const [investOptimizations, setInvestOptimizations] = useState<OptimizationResult[]>([]);
-
-  // "Deploy Capital" — strategy-driven single-contribution breakdown
-  const [deployResult, setDeployResult] = useState<DeployAllocation[] | null>(null);
-  const [deployStrategy, setDeployStrategy] = useState<"balance" | "rebalance" | "growth">("rebalance");
-  const [deployAmount, setDeployAmount] = useState("");
-  const [deployCalibration, setDeployCalibration] = useState<Record<string, { suggestedShare: number; rationale: string }>>({});
-  const [calibratingDeploy, setCalibratingDeploy] = useState(false);
-  const [deployCalibrationError, setDeployCalibrationError] = useState<string | null>(null);
-  const [tickerPrices, setTickerPrices] = useState<Record<string, number>>({});
-  const [deployNotes, setDeployNotes] = useState("");
-
-  // "Council" — financial analyst + macro strategist + action summary
-  const [analystOutput, setAnalystOutput] = useState("");
-  const [strategistOutput, setStrategistOutput] = useState("");
-  const [summaryOutput, setSummaryOutput] = useState("");
-  const [councilPhase, setCouncilPhase] = useState<"analyst" | "strategist" | "summary" | null>(null);
-  const [councilError, setCouncilError] = useState<string | null>(null);
-  const [councilAnalystPrompt, setCouncilAnalystPrompt] = useState<PromptPayload | undefined>();
-  const [councilStrategistPrompt, setCouncilStrategistPrompt] = useState<PromptPayload | undefined>();
-  const [summaryPrompt, setSummaryPrompt] = useState<PromptPayload | undefined>();
-  const analystEndRef = useRef<HTMLDivElement>(null);
-  const strategistEndRef = useRef<HTMLDivElement>(null);
-  const summaryEndRef = useRef<HTMLDivElement>(null);
-  const councilOutputRef = useRef<HTMLDivElement>(null);
 
   // Persist plan inputs
   useEffect(() => {
@@ -339,19 +290,6 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
     if (investPlan) investPlanEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [investPlan]);
 
-
-  useEffect(() => {
-    if (analystOutput) analystEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [analystOutput]);
-
-  useEffect(() => {
-    if (strategistOutput) strategistEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [strategistOutput]);
-
-  useEffect(() => {
-    if (summaryOutput) summaryEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [summaryOutput]);
-
   // ── Unified row list ────────────────────────────────────────────────────────
 
   const allRows: PlanRow[] = [
@@ -364,47 +302,11 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
     if (!news) return [];
     return allRows.filter((r) => {
       if (r.ticker && new RegExp(`\\b${r.ticker}\\b`, "i").test(news)) return true;
-      const firstName = r.name.split(/[\s,.(]/)[0];
+      const firstName = r.name.split(/[\s,.(]/)[0] ?? "";
       if (firstName.length >= 4 && new RegExp(`\\b${firstName}\\b`, "i").test(news)) return true;
       return false;
     });
   }, [newsTagline, allRows]);
-
-  // Fetch last-known share prices for planned holdings when deploy result or rows change
-  useEffect(() => {
-    if (!deployResult) return;
-    const plannedTickers = deployResult
-      .filter((r) => {
-        const row = allRows.find((ar) => ar.id === r.id);
-        return row?.isPlanned && r.ticker;
-      })
-      .map((r) => r.ticker)
-      .filter((t, i, arr) => t && arr.indexOf(t) === i); // unique, non-empty
-    if (plannedTickers.length === 0) return;
-
-    void (async () => {
-      try {
-        const symbols = plannedTickers.join(",");
-        const res = await fetch(`/yf-api/v7/finance/quote?symbols=${encodeURIComponent(symbols)}`);
-        if (!res.ok) return;
-        const json = await res.json() as {
-          quoteResponse?: { result?: { symbol: string; regularMarketPrice?: number }[] };
-        };
-        const results = json.quoteResponse?.result ?? [];
-        const prices: Record<string, number> = {};
-        for (const q of results) {
-          if (q.symbol && typeof q.regularMarketPrice === "number") {
-            prices[q.symbol] = q.regularMarketPrice;
-          }
-        }
-        if (Object.keys(prices).length > 0) {
-          setTickerPrices((prev) => ({ ...prev, ...prices }));
-        }
-      } catch {
-        // Best-effort — silent failure, no enforcement for missing prices
-      }
-    })();
-  }, [deployResult, allRows]);
 
   // ── Buy math ────────────────────────────────────────────────────────────────
 
@@ -515,7 +417,7 @@ export function InvestmentPlanningView({ holdings, totalValue, cashAccountsTotal
           if (tickerRegex.test(news)) return true;
         }
         // Match company name (first significant word, at least 4 chars to avoid noise)
-        const firstName = r.name.split(/[\s,.(]/)[0];
+        const firstName = r.name.split(/[\s,.(]/)[0] ?? "";
         if (firstName.length >= 4) {
           const nameRegex = new RegExp(`\\b${firstName}\\b`, "i");
           if (nameRegex.test(news)) return true;
@@ -627,10 +529,18 @@ Be specific. Name what each position is doing. Avoid generic portfolio advice. T
 
       setThesisPrompt({ system: systemPrompt, user: userMessage });
 
+      // Slow, methodical reasoning. Opus 4.8 uses adaptive thinking; Sonnet 4.5
+      // (legacy) uses extended thinking with a token budget below max_tokens.
+      const thinking: Anthropic.Messages.ThinkingConfigParam =
+        model === "claude-sonnet-4-5"
+          ? { type: "enabled", budget_tokens: 6000 }
+          : { type: "adaptive" };
+
       let text = "";
       const stream = await client.messages.stream({
         model,
-        max_tokens: 8192,
+        max_tokens: 16000,
+        thinking,
         system: systemPrompt,
         messages: [{ role: "user", content: userMessage }],
       });
@@ -642,826 +552,184 @@ Be specific. Name what each position is doing. Avoid generic portfolio advice. T
         }
       }
     } catch (err) {
-      setThesisError(err instanceof Error ? err.message : String(err));
+      setThesisError(describeApiError(err));
     } finally {
       setAnalyzingThesis(false);
     }
   }
 
-  // ── Quarterly convergence math ───────────────────────────────────────────────
-
-  function computeConvergence(
-    items: { id: string; name: string; ticker: string; targetPct: number }[],
-    startValues: number[],
-    monthly: number,
-    strategy: "balance" | "rebalance" | "growth",
-    maxQuarters = 20,
-  ) {
-    const CONVERGENCE_THRESHOLD = 1.5; // % within target = converged
-    const values = [...startValues];
-    const quarterlySnapshots: { quarter: number; totalValue: number; weights: number[] }[] = [];
-    let convergedQuarter: number | null = null;
-
-    for (let m = 1; m <= maxQuarters * 3; m++) {
-      const total = values.reduce((s, v) => s + v, 0);
-
-      if (strategy === "balance") {
-        // Split contribution by target weight each month
-        for (let i = 0; i < items.length; i++) {
-          values[i] = (values[i] ?? 0) + monthly * ((items[i]?.targetPct ?? 0) / 100);
-        }
-      } else if (strategy === "rebalance") {
-        // Gap-weighted fill: underweight positions get proportionally more
-        const gaps = items.map((h, i) => Math.max(h.targetPct / 100 - (values[i] ?? 0) / total, 0.001));
-        const gapSum = gaps.reduce((s, g) => s + g, 0);
-        for (let i = 0; i < items.length; i++) values[i] = (values[i] ?? 0) + monthly * ((gaps[i] ?? 0) / gapSum);
-      } else {
-        // Growth: concentrate on most underweight within drift band; quarterly convergence forced
-        const isConvergenceQuarter = m % 3 === 0;
-        if (isConvergenceQuarter) {
-          // Forced quarterly convergence: gap-weighted fill
-          const gaps = items.map((h, i) => Math.max(h.targetPct / 100 - (values[i] ?? 0) / total, 0.001));
-          const gapSum = gaps.reduce((s, g) => s + g, 0);
-          for (let i = 0; i < items.length; i++) values[i] = (values[i] ?? 0) + monthly * ((gaps[i] ?? 0) / gapSum);
-        } else {
-          // Return-weighted with floor: find most underweight that hasn't breached drift band
-          let maxGapIdx = -1, maxGap = -Infinity;
-          for (let i = 0; i < items.length; i++) {
-            const currentPct = (values[i] ?? 0) / total;
-            const target = (items[i]?.targetPct ?? 0) / 100;
-            const gap = target - currentPct;
-            if (gap > maxGap) { maxGap = gap; maxGapIdx = i; }
-          }
-          if (maxGapIdx >= 0) {
-            values[maxGapIdx] = (values[maxGapIdx] ?? 0) + monthly;
-          } else {
-            const gaps = items.map((h, i) => Math.max(h.targetPct / 100 - (values[i] ?? 0) / total, 0.001));
-            const gapSum = gaps.reduce((s, g) => s + g, 0);
-            for (let i = 0; i < items.length; i++) values[i] = (values[i] ?? 0) + monthly * ((gaps[i] ?? 0) / gapSum);
-          }
-        }
-      }
-
-      if (m % 3 === 0) {
-        const newTotal = values.reduce((s, v) => s + v, 0);
-        const weights = values.map(v => (v / newTotal) * 100);
-        quarterlySnapshots.push({ quarter: m / 3, totalValue: newTotal, weights });
-
-        // Check convergence
-        if (convergedQuarter === null) {
-          const allConverged = items.every((h, i) => Math.abs((weights[i] ?? 0) - h.targetPct) < CONVERGENCE_THRESHOLD);
-          if (allConverged) convergedQuarter = m / 3;
-        }
-        if (convergedQuarter !== null) break;
-      }
-    }
-
-    return { quarterlySnapshots, convergedQuarter };
-  }
-
-  // ── "Deploy Capital" — strategy-driven allocation math ──────────────────────
-
-  // Resolve share price for a planned holding: stored price takes priority over live ticker fetch
-  function getSharePrice(holdingId: string, ticker: string): number | undefined {
-    const planned = plannedHoldings.find((p) => p.id === holdingId);
-    if (planned?.pricePerShare) return planned.pricePerShare;
-    if (ticker) return tickerPrices[ticker];
-    return undefined;
-  }
-
-  // Post-process deploy allocations: zero out planned-holding slots where the
-  // dollar amount can't buy even one share, then redistribute freed cash.
-  function enforceShareMinimums(items: DeployAllocation[], totalCash: number): DeployAllocation[] {
-    let freedCash = 0;
-    const adjusted = items.map((r) => {
-      const row = allRows.find((ar) => ar.id === r.id);
-      if (!row?.isPlanned) return r;
-      const sharePrice = getSharePrice(r.id, r.ticker);
-      if (sharePrice != null && r.allocation > 0 && r.allocation < sharePrice) {
-        freedCash += r.allocation;
-        return { ...r, allocation: 0, sharePct: 0, newValue: r.currentValue, tag: "skipped" as const };
-      }
-      return r;
-    });
-
-    if (freedCash <= 0) return adjusted;
-
-    const eligible = adjusted.filter((r) => r.allocation > 0);
-    const totalEligible = eligible.reduce((s, r) => s + r.allocation, 0);
-    if (totalEligible === 0) return adjusted;
-
-    return adjusted.map((r) => {
-      if (r.allocation <= 0) return r;
-      const extra = freedCash * (r.allocation / totalEligible);
-      const newAlloc = r.allocation + extra;
-      const newValue = r.currentValue + newAlloc;
-      return { ...r, allocation: newAlloc, sharePct: (newAlloc / totalCash) * 100, newValue };
-    });
-  }
-
-  function computeDeployment(
-    cash: number,
-    strategy: "balance" | "rebalance" | "growth",
-  ): DeployAllocation[] {
-    const eligible = rowsWithBuy.filter(r => r.targetPct > 0);
-    const newTotal = effectiveTotalValue + cash;
-
-    if (strategy === "balance") {
-      const raw = eligible
-        .map(r => {
-          const allocation = cash * (r.targetPct / 100);
-          const newValue = r.current_value + allocation;
-          return {
-            id: r.id, name: r.name, ticker: r.ticker ?? "", assetClass: r.asset_class,
-            currentValue: r.current_value, currentPct: r.currentPct, targetPct: r.targetPct,
-            allocation, sharePct: (allocation / cash) * 100,
-            newValue, newPct: (newValue / newTotal) * 100,
-            tag: "target-split" as const,
-          };
-        });
-      return enforceShareMinimums(raw, cash).sort((a, b) => b.allocation - a.allocation);
-    }
-
-    if (strategy === "rebalance") {
-      const gapTotal = eligible.reduce((s, r) => s + Math.max(0, r.delta), 0);
-      const raw = eligible
-        .map(r => {
-          const gap = Math.max(0, r.delta);
-          const allocation = gapTotal > 0 ? cash * (gap / gapTotal) : 0;
-          const newValue = r.current_value + allocation;
-          return {
-            id: r.id, name: r.name, ticker: r.ticker ?? "", assetClass: r.asset_class,
-            currentValue: r.current_value, currentPct: r.currentPct, targetPct: r.targetPct,
-            allocation, sharePct: (allocation / cash) * 100,
-            newValue, newPct: (newValue / newTotal) * 100,
-            tag: gap > 0 ? "gap-fill" as const : "skipped" as const,
-          };
-        });
-      return enforceShareMinimums(raw, cash).sort((a, b) => b.allocation - a.allocation);
-    }
-
-    // Growth: return-weighted with 20% floor reserved for positions >10% below target
-    const FLOOR_THRESHOLD = 10; // % delta that triggers floor protection
-    const FLOOR_SHARE = 0.20;
-
-    const floorPositions = eligible.filter(r => r.delta > FLOOR_THRESHOLD);
-    const mainPositions = eligible.filter(r => r.delta > -5 && r.delta <= FLOOR_THRESHOLD);
-
-    const allocations: Record<string, number> = {};
-
-    if (floorPositions.length > 0) {
-      const floorBudget = cash * FLOOR_SHARE;
-      const floorGapSum = floorPositions.reduce((s, r) => s + r.delta, 0);
-      for (const r of floorPositions) {
-        allocations[r.id] = floorBudget * (r.delta / floorGapSum);
-      }
-    }
-
-    const mainBudget = cash - Object.values(allocations).reduce((s, v) => s + v, 0);
-    if (mainPositions.length > 0) {
-      const scores = mainPositions.map(r => Math.max(ASSET_CLASS_RETURNS[r.asset_class] ?? 0.07, 0.01));
-      const scoreSum = scores.reduce((s, sc) => s + sc, 0);
-      mainPositions.forEach((r, i) => {
-        allocations[r.id] = (allocations[r.id] ?? 0) + mainBudget * ((scores[i] ?? 0.01) / scoreSum);
-      });
-    }
-
-    const growthRaw = eligible
-      .map(r => {
-        const allocation = allocations[r.id] ?? 0;
-        const newValue = r.current_value + allocation;
-        const isFloor = floorPositions.some(fp => fp.id === r.id);
-        const isMain = mainPositions.some(mp => mp.id === r.id);
-        return {
-          id: r.id, name: r.name, ticker: r.ticker ?? "", assetClass: r.asset_class,
-          currentValue: r.current_value, currentPct: r.currentPct, targetPct: r.targetPct,
-          allocation, sharePct: (allocation / cash) * 100,
-          newValue, newPct: (newValue / newTotal) * 100,
-          tag: (isFloor ? "floor" : isMain ? "return-weighted" : "skipped") as DeployAllocation["tag"],
-        };
-      });
-    return enforceShareMinimums(growthRaw, cash)
-      .sort((a, b) => b.allocation - a.allocation);
-  }
-
-  async function handleDeployCalibrate(result: DeployAllocation[], cash: number) {
-    const apiKey = localStorage.getItem("anthropicApiKey");
-    if (!apiKey || result.length === 0) return;
-    setCalibratingDeploy(true);
-    setDeployCalibrationError(null);
-
-    try {
-      const client = buildClient();
-
-      const strategyLabel = deployStrategy === "growth"
-        ? "Growth (return-weighted by asset class, floor protection for significantly underweight positions)"
-        : deployStrategy === "rebalance"
-          ? "Rebalance (gap-weighted fill — underweight positions receive proportionally more)"
-          : "Balance (split by target weight)";
-
-      const holdingsList = result.map(r => {
-        const isPlanned = allRows.find((ar) => ar.id === r.id)?.isPlanned ?? false;
-        const sharePrice = isPlanned ? getSharePrice(r.id, r.ticker) : undefined;
-        const priceStr = sharePrice != null ? ` | Share price: $${sharePrice.toFixed(2)}` : "";
-        const plannedTag = isPlanned ? " | [PLANNED — no position yet]" : "";
-        return `- id: "${r.id}" | ${r.ticker || r.name} | ${ASSET_CLASSES.find(a => a.value === r.assetClass)?.label ?? r.assetClass} | Current: ${r.currentPct.toFixed(1)}% | Target: ${r.targetPct.toFixed(1)}% | Computed deploy: $${r.allocation.toFixed(0)} (${r.sharePct.toFixed(1)}% of cash) | Method: ${r.tag}${priceStr}${plannedTag}`;
-      }).join("\n");
-
-      const idsList = result.map(r =>
-        `- id: "${r.id}" | ${r.ticker || r.name}`
-      ).join("\n");
-
-      const macroContextBlock = deployStrategy === "growth"
-        ? (() => {
-            const parts: string[] = [];
-            if (thesis.trim()) parts.push(`**Macro / portfolio thesis (from prior analysis):**\n${thesis.trim()}`);
-            if (strategistOutput.trim()) parts.push(`**Macro strategist view:**\n${strategistOutput.trim()}`);
-            if (analystOutput.trim()) parts.push(`**Equity analyst view:**\n${analystOutput.trim()}`);
-            return parts.length > 0
-              ? `\n\n---\n${parts.join("\n\n")}\n---\n\nThis macro context is your mandate. Allocate capital to where the macro thesis has conviction — not to where the portfolio is mechanically underweight. A position that is at or above target weight but has strong macro tailwinds should still receive capital. A position with macro headwinds should receive little or none, regardless of how far below target it sits. Do not let gap-filling logic dilute macro conviction.`
-              : "";
-          })()
-        : "";
-
-      const calibrationCriteria = deployStrategy === "growth"
-        ? `- **Macro conviction (primary, decisive)** — the macro thesis and strategist/analyst views above are your mandate. Capital flows to where macro has conviction. Tailwinds get weight; headwinds get reduced or zero allocation. This rule takes precedence over everything else.
-- Growth momentum and expected return — among macro-neutral positions, favor higher-return asset classes and compounders
-- Sequencing — which positions benefit most from receiving capital now vs. later
-- Portfolio construction — accept meaningful skew toward macro-confirmed names; only avoid extreme single-position concentration
-- **Planned positions [PLANNED]** — these are intended holdings with no current exposure. Use macro conviction to decide if now is the right time to open the position with this capital. If macro supports the thesis, establishing a starting stake is a valid and preferred use of deployment capital. If macro is neutral or negative, defer.
-- **Target weights are informational only** — do not treat underweight positions as having a claim on this deployment. If macro does not support a position, gap-filling is not a reason to allocate to it.`
-        : `- Current underweight/overweight status relative to target
-- Asset class expected return and risk profile
-- Portfolio construction quality — avoid over-concentrating in a single position or asset class in a single deployment
-- Sequencing risk — which positions benefit most from early capital (compounding, valuation, momentum)`;
-
-      const deployNotesBlock = deployNotes.trim()
-        ? `\n\n---\n**Macro notes (from news analysis):**\n${deployNotes.trim()}\n---\n\nFactor these notes into your allocation decisions.`
-        : "";
-
-      const activePositions = result.filter(r => r.allocation > 0);
-      const avgPerPosition = activePositions.length > 0 ? cash / activePositions.length : cash;
-      const isThinSpread = cash < SINGLE_DUMP_THRESHOLD || avgPerPosition < MIN_PER_POSITION;
-      const concentrationBlock = isThinSpread
-        ? `\n\n**Contribution size advisory:** This is a small deployment ($${cash.toFixed(0)} across ${activePositions.length} position${activePositions.length !== 1 ? "s" : ""}, averaging $${avgPerPosition.toFixed(0)}/position). At this size, spreading thin across all holdings is likely counterproductive. Strongly consider concentrating the full amount into 1–2 highest-conviction positions rather than distributing mechanically. Set suggestedShare to 0 for positions where the resulting dollar amount would be too small to be meaningful.`
-        : "";
-
-      const userMsg = `I am deploying $${cash.toFixed(0)} into my portfolio using the ${strategyLabel} strategy.${macroContextBlock}${deployNotesBlock}${concentrationBlock}
-
-Portfolio value: $${effectiveTotalValue.toFixed(0)} → $${(effectiveTotalValue + cash).toFixed(0)} post-deploy
-
-Holdings and computed allocation:
-${holdingsList}
-
-Review each holding's computed share of the $${cash.toFixed(0)} deployment. For each, return your suggested share (as a decimal fraction of total cash, e.g. 0.25 for 25%) based on:
-${calibrationCriteria}
-
-Holdings with IDs:
-${idsList}
-
-Return ONLY a valid JSON array — no markdown, no explanation outside the JSON:
-[
-  {
-    "id": "<holding_id>",
-    "ticker": "<ticker or name>",
-    "suggestedShare": <decimal 0–1>,
-    "rationale": "<1–2 sentence justification>"
-  }
-]
-
-All suggestedShare values must sum to 1.0 (within 0.01).${deployStrategy === "growth" ? " Do NOT use target weight gaps as a reason to allocate — let macro conviction drive the distribution." : " Do not allocate to holdings at or above target unless there is a strong reason."}
-
-If a holding has a "Share price" listed, do not suggest an allocation where (suggestedShare × $${cash.toFixed(0)}) is less than that share price — a sub-share deployment is not actionable.`;
-
-      const systemMsg = deployStrategy === "growth"
-        ? `You are a growth-oriented portfolio manager deploying capital according to a macro thesis. Your job is NOT to fill portfolio gaps or rebalance toward targets — it is to place capital where the macro environment gives you conviction. Ignore how far a position is from its target weight; that is irrelevant in growth mode. Allocate to macro-confirmed positions aggressively and leave macro-headwind positions at zero or near-zero even if they are deeply underweight. Return ONLY valid JSON — no markdown, no explanation outside the array. Every suggestedShare must be a decimal (0.0–1.0). All shares must sum to 1.0.`
-        : `You are a quantitative portfolio manager calibrating a capital deployment plan. Return ONLY valid JSON — no markdown, no explanation outside the array. Every suggestedShare must be a decimal (0.0–1.0). All shares must sum to 1.0. Be realistic and specific. If a holding is already at target, suggestedShare should be 0.`;
-
-      const response = await client.messages.create({
-        model,
-        max_tokens: 2048,
-        system: systemMsg,
-        messages: [{ role: "user", content: userMsg }],
-      });
-
-      const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
-
-      // Walk the string to find the balanced closing bracket, respecting strings and
-      // escape sequences — avoids the greedy-regex problem where trailing text after
-      // the array (or ] inside rationale strings) causes JSON.parse to fail.
-      const extractJsonArray = (text: string): string | null => {
-        const start = text.indexOf("[");
-        if (start === -1) return null;
-        let depth = 0;
-        let inString = false;
-        let escape = false;
-        for (let i = start; i < text.length; i++) {
-          const ch = text[i];
-          if (escape) { escape = false; continue; }
-          if (ch === "\\" && inString) { escape = true; continue; }
-          if (ch === '"') { inString = !inString; continue; }
-          if (inString) continue;
-          if (ch === "[") depth++;
-          else if (ch === "]") { depth--; if (depth === 0) return text.slice(start, i + 1); }
-        }
-        return null;
-      };
-
-      const jsonStr = extractJsonArray(raw);
-      if (!jsonStr) throw new Error("Claude didn't return a valid JSON array. Try again.");
-
-      const estimates: { id: string; ticker: string; suggestedShare: number; rationale: string }[] = JSON.parse(jsonStr);
-
-      // Build initial calibration map
-      const newCalibration: Record<string, { suggestedShare: number; rationale: string }> = {};
-      for (const est of estimates) {
-        if (est.id && typeof est.suggestedShare === "number") {
-          newCalibration[est.id] = {
-            suggestedShare: est.suggestedShare,
-            rationale: est.rationale ?? "",
-          };
-        }
-      }
-
-      // Post-parse enforcement: zero out sub-share allocations for planned holdings
-      let freedShare = 0;
-      for (const r of result) {
-        const isPlanned = allRows.find((ar) => ar.id === r.id)?.isPlanned ?? false;
-        const sharePrice = isPlanned ? getSharePrice(r.id, r.ticker) : undefined;
-        const cal = newCalibration[r.id];
-        if (sharePrice != null && cal && cash * cal.suggestedShare < sharePrice) {
-          freedShare += cal.suggestedShare;
-          newCalibration[r.id] = { suggestedShare: 0, rationale: cal.rationale };
-        }
-      }
-
-      // Redistribute freed share proportionally to valid (non-zero) entries
-      if (freedShare > 0) {
-        const validIds = result
-          .filter((r) => (newCalibration[r.id]?.suggestedShare ?? 0) > 0)
-          .map((r) => r.id);
-
-        if (validIds.length > 0) {
-          const totalValid = validIds.reduce((s, id) => s + (newCalibration[id]?.suggestedShare ?? 0), 0);
-          for (const id of validIds) {
-            const cal = newCalibration[id];
-            if (cal) {
-              cal.suggestedShare += freedShare * (cal.suggestedShare / totalValid);
-            }
-          }
-        } else {
-          // Fallback: equal split across positions with a non-zero math allocation;
-          // if none exist (edge case), split equally across all positions
-          const fallbackIds = result.filter((r) => r.allocation > 0).map((r) => r.id);
-          const targets = fallbackIds.length > 0 ? fallbackIds : result.map((r) => r.id);
-          const share = targets.length > 0 ? 1 / targets.length : 0;
-          for (const id of targets) {
-            const cal = newCalibration[id];
-            if (cal) cal.suggestedShare = share;
-          }
-        }
-      }
-
-      setDeployCalibration(newCalibration);
-    } catch (err) {
-      setDeployCalibrationError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setCalibratingDeploy(false);
-    }
-  }
-
-  // ── "Invest with Claude" — deployment plan ──────────────────────────────────
+  // ── "Invest with Claude" — analyst deposit-allocation plan ──────────────────
+  // Encodes the 3-phase analyst methodology: macro-aware sizing → DCA price
+  // awareness → single-name calibration + multi-month cadence. Claude assigns
+  // the actual dollar amounts (no pre-computed split fed in).
 
   async function handleInvestPlan() {
     const apiKey = localStorage.getItem("anthropicApiKey");
     if (!apiKey) return;
+    if (!thesis.trim()) {
+      setInvestPlanError("Run Analyze first — the deposit plan needs the macro strategist's read to size against.");
+      return;
+    }
     setAnalyzingPlan(true);
     setInvestPlan("");
     setInvestPlanError(null);
-    setInvestOptimizations([]);
+    setInvestActivity(null);
 
     try {
       const client = buildClient();
 
-      // ── Build current state table ──
-      const holdingRows = rowsWithBuy.map((r) => {
-        const status = r.delta > 1 ? "UNDERWEIGHT" : r.delta < -1 ? "OVERWEIGHT" : "AT-WEIGHT";
-        const unstarted = r.current_value === 0 && r.targetPct > 0 ? " [UNSTARTED]" : "";
-        const planned = r.isPlanned ? " [PLANNED]" : "";
-        const doNotBuy = r.buy > 0 && (r.buy < 50 || (newTotal > 0 && r.buy / newTotal < 0.005))
-          ? " [DO NOT BUY — size too small]" : "";
+      const months = Math.max(1, Math.round(parseFloat(buildoutMonths) || 1));
+      const totalOverHorizon = cashNum + monthlyNum * Math.max(0, months - 1);
+
+      // Per-holding facts — current/target weight, cost basis, and unrealized P&L
+      // as the DCA signal (below basis = lean in; extended above basis = less urgent).
+      const holdingRows = allRows.map((r) => {
+        const targetPct = parseFloat(allocations[r.id] ?? "") || 0;
+        const currentPct = effectiveTotalValue > 0 ? (r.current_value / effectiveTotalValue) * 100 : 0;
         const ticker = r.ticker ? ` (${r.ticker})` : "";
         const assetLabel = ASSET_CLASSES.find((a) => a.value === r.asset_class)?.label ?? r.asset_class;
-        return `| ${r.name}${ticker} | ${assetLabel} | $${r.current_value.toFixed(2)} | ${r.currentPct.toFixed(1)}% | ${r.targetPct.toFixed(1)}% | ${r.delta > 0 ? "+" : ""}${r.delta.toFixed(1)}% | ${status}${unstarted}${planned}${doNotBuy} |`;
+        const planned = r.isPlanned ? " [PLANNED]" : "";
+        // Cost basis / unrealized only exist for real holdings
+        const costBasis = !r.isPlanned ? r.cost_basis : 0;
+        const unrealized = !r.isPlanned && costBasis > 0
+          ? `${(((r.current_value - costBasis) / costBasis) * 100) >= 0 ? "+" : ""}${(((r.current_value - costBasis) / costBasis) * 100).toFixed(1)}%`
+          : "—";
+        const shares = !r.isPlanned && r.shares ? r.shares : null;
+        const avgCost = shares && costBasis > 0 ? `$${(costBasis / shares).toFixed(2)}` : "—";
+        return `| ${r.name}${ticker} | ${assetLabel} | $${r.current_value.toFixed(2)} | ${currentPct.toFixed(1)}% | ${targetPct.toFixed(1)}%${planned} | ${costBasis > 0 ? `$${costBasis.toFixed(2)}` : "—"} | ${unrealized} | ${avgCost} |`;
       }).join("\n");
 
-      const unstartedPositions = rowsWithBuy.filter((r) => r.current_value === 0 && r.targetPct > 0);
-      const overweightPositions = rowsWithBuy.filter((r) => r.delta < -1);
-      const doNotBuyPositions = rowsWithBuy.filter((r) => r.buy > 0 && (r.buy < 50 || (newTotal > 0 && r.buy / newTotal < 0.005)));
+      const macroBlock = `**Macro strategist notes (from the desk's macro read):**\n${thesis.trim()}`;
 
-      // ── Compute quarterly convergence schedule ──
-      const convergenceItems = rowsWithBuy
-        .filter((r) => r.targetPct > 0)
-        .map((r) => ({ id: r.id, name: r.name, ticker: r.ticker ?? "", targetPct: r.targetPct }));
-      const startValues = rowsWithBuy
-        .filter((r) => r.targetPct > 0)
-        .map((r) => r.current_value + (cashNum > 0 ? r.buy : 0)); // start from post-deploy values
+      const convictionBlock = notes.trim()
+        ? `\n\n**My conviction notes — treat these as deliberate leanings. Respect the conviction itself and weight it heavily, but YOU still decide the actual dollar sizing with your own analytical judgment; note briefly where current data pushes against a lean:**\n${notes.trim()}`
+        : "";
 
-      let convergenceSection = "";
-      let originalConvergedQuarter: number | null = null;
-      if (monthlyNum > 0 && convergenceItems.length > 0) {
-        const { quarterlySnapshots, convergedQuarter } = computeConvergence(
-          convergenceItems, startValues, monthlyNum, investStrategy
-        );
-        originalConvergedQuarter = convergedQuarter;
-
-        const strategyLabel = investStrategy === "growth"
-          ? "Growth (return-weighted, floor protection, quarterly convergence)"
-          : investStrategy === "rebalance"
-            ? "Rebalance (gap-weighted fill each month)"
-            : "Balance (split by target weight each month)";
-
-        // Build header: Holding names truncated
-        const colHeaders = convergenceItems.map(h => h.ticker || h.name.split(" ")[0]).join(" | ");
-        const targetRow = `| **Target** | — | ${convergenceItems.map(h => `**${h.targetPct.toFixed(1)}%**`).join(" | ")} |`;
-
-        const snapshotRows = quarterlySnapshots.map(snap => {
-          const weightCols = snap.weights.map((w, i) => {
-            const target = convergenceItems[i]?.targetPct ?? 0;
-            const delta = w - target;
-            const marker = Math.abs(delta) < 1.5 ? "✓" : delta > 0 ? "▲" : "▼";
-            return `${w.toFixed(1)}% ${marker}`;
-          }).join(" | ");
-          return `| Q${snap.quarter} | $${(snap.totalValue / 1000).toFixed(1)}K | ${weightCols} |`;
-        }).join("\n");
-
-        const convergenceNote = convergedQuarter
-          ? `All positions converge to within 1.5% of target by **Q${convergedQuarter}** (~${(convergedQuarter / 4).toFixed(1)} years).`
-          : `Positions do not fully converge within ${quarterlySnapshots.length} quarters at $${monthlyNum.toFixed(0)}/mo.`;
-
-        convergenceSection = `
-
-## Quarterly Convergence Schedule
-**Strategy: ${strategyLabel}**
-**Monthly contribution: $${monthlyNum.toFixed(2)}**
-${convergenceNote}
-
-| Quarter | Portfolio | ${colHeaders} |
-|---------|-----------|${convergenceItems.map(() => "---").join("|")}|
-${snapshotRows}
-${targetRow}
-
-✓ = within 1.5% of target · ▲ = overweight · ▼ = underweight`;
-      }
+      const priceBlock = priceNotes.trim()
+        ? `\n\n**Current price / DCA notes:**\n${priceNotes.trim()}`
+        : `\n\n**Price / DCA notes:** none provided. Infer DCA opportunities from the Cost Basis / Unrealized columns above — positions below basis or showing losses are candidates to lean into; positions extended above basis have less urgency.`;
 
       const userMessage =
-        `I have $${cashNum.toFixed(2)} to deploy today and contribute $${monthlyNum.toFixed(2)}/month. Portfolio: $${effectiveTotalValue.toFixed(2)} → $${newTotal.toFixed(2)} post-deploy.
+        `Here is my current portfolio and target allocations. Rows marked [PLANNED] are positions I intend to build but don't yet own.
 
-## Current vs Target Allocation
-| Holding | Class | Value | Current% | Target% | Delta | Status |
-|---------|-------|-------|----------|---------|-------|--------|
+**This deposit:** $${cashNum.toFixed(2)} — treat as Month 1 of ${months}.
+**Planned cadence:** $${monthlyNum.toFixed(2)}/month for ${months} month${months === 1 ? "" : "s"} (~$${totalOverHorizon.toFixed(0)} total over the build-out).
+**Portfolio value:** $${effectiveTotalValue.toFixed(2)} → $${(effectiveTotalValue + cashNum).toFixed(2)} after this deposit.
+
+| Holding | Asset Class | Current Value | Current % | Target % | Cost Basis | Unrealized | Avg Cost/sh |
+|---------|-------------|---------------|-----------|----------|------------|------------|-------------|
 ${holdingRows}
 
-**Overweight:** ${overweightPositions.length > 0 ? overweightPositions.map(r => `${r.ticker || r.name} (${r.delta.toFixed(1)}%)`).join(", ") : "None"}
-**Unstarted/Planned:** ${unstartedPositions.length > 0 ? unstartedPositions.map(r => `${r.ticker || r.name} → ${r.targetPct}%`).join(", ") : "None"}
-**Do Not Buy (too small):** ${doNotBuyPositions.length > 0 ? doNotBuyPositions.map(r => `${r.ticker || r.name} ($${r.buy.toFixed(2)})`).join(", ") : "None"}
-${convergenceSection}
+${macroBlock}${convictionBlock}${priceBlock}
 
-Analyze this deployment and contribution plan:
-1. **Today's deploy** — how to allocate the $${cashNum.toFixed(2)}, noting any DO NOT BUY positions (defer, consolidate, or remove?), and when to initiate UNSTARTED positions.
-2. **Convergence assessment** — based on the quarterly schedule above, evaluate whether the ${investStrategy === "balance" ? "Balance (target-weight split)" : investStrategy === "rebalance" ? "Rebalance (gap-weighted fill)" : "Growth (return-weighted, quarterly convergence)"} strategy is appropriate for this portfolio's size, contribution rate, and composition. Is the convergence pace too slow, too fast, or right? Are there positions where the strategy's sequencing causes a problem?
-3. **Optimizations** — identify 1–2 specific improvements to target allocations that would improve convergence quality. For each, briefly explain the rationale in 1-2 sentences.
-
-Be direct. Reference tickers and numbers.
-
-After your analysis, output a JSON block with the exact target allocation adjustments for each optimization. Only include holdings whose target % changes. All adjusted targets across the full portfolio must still sum to 100%.
-
-<optimizations>
-[
-  {
-    "label": "Short label (e.g. Smooth VGIT ramp)",
-    "summary": "One sentence explaining what changes and why",
-    "adjustedTargets": { "TICKER_OR_NAME": newTargetPct }
-  }
-]
-</optimizations>`;
+Research current conditions and how each holding is performing against the thesis it was bought for, decide whether to RAISE / MAINTAIN / REDUCE each holding's target, flag any DCA opportunities to buy at a lower price, then deploy this $${cashNum.toFixed(0)} deposit toward where conviction is rising and where the dips are — NOT as a balance against my existing target weights. The per-holding dollars for THIS deposit must sum to exactly $${cashNum.toFixed(0)}.`;
 
       const systemPrompt =
-        `You are a portfolio manager reviewing a mathematically computed contribution and convergence schedule. The quarterly allocation table is already computed — do not regenerate it. Your job is to interpret it strategically: is the convergence pace right, is the strategy fit appropriate, are there sequencing problems, and what should change. Target allocations are the investor's intended state — do not suggest changing them unless the convergence data reveals a structural problem. Be opinionated and specific. At the end of your response, output the <optimizations> JSON block exactly as instructed — it will be parsed by code, not displayed to the user.`;
+        `You are a financial analyst on a strategic wealth investment team. Your job is NOT to balance a deposit against the investor's existing target weights. It is to: (1) research current conditions and judge how each holding is performing against the thesis it was bought for, (2) decide whether to RAISE, MAINTAIN, or REDUCE each holding's target, (3) flag DCA opportunities where a holding can be bought at a lower price, and (4) deploy the incoming deposit toward where conviction is rising and where the dips are. The investor's target % is a starting point you revise — not a number to hit.
+
+Work slowly and methodically — think the deposit through step by step before committing to numbers, the way a desk analyst would. Narrate each phase in a short line of plain text as you work (e.g. "Researching the macro backdrop…", "Now the single-name catalysts…", "Verifying the dollars sum…") so the reader can follow your process.
+
+Process — work through these phases IN ORDER:
+1. **Macro research.** Web-search the current backdrop: major index levels and consensus / year-end targets, the rate and inflation path, sector rotation. This sets the near-term view.
+2. **Thesis-vs-performance research.** Run a SECOND wave of web searches on each holding and its theme — how is it actually performing, and is the thesis it was bought for intact, strengthening, or breaking? Cover the single names and the thematic sleeves (uranium, copper, oil, semis, etc.). Keep it separate from the macro wave.
+3. **Target review — the core step.** For EACH holding, decide RAISE / MAINTAIN / REDUCE its end-state target, justified by the research: thesis strengthening or leadership confirmed → raise; intact → maintain; weakening, over-extended / over-concentrated, or carrying single-name tail risk too large for this book → reduce. The investor's target is a starting guess you are revising, not a number to hit.
+4. **DCA pass — independent of targets.** Separately, find the buy-at-a-lower-price opportunities: holdings below the investor's average cost / near lows, or a discount the macro read says won't last. These matter regardless of weight.
+5. **Size this deposit, then VERIFY.** Deploy the deposit toward (3) the targets you raised and (4) the DCA dips — fund rising conviction and cheap entries. Confirm the dollars sum to EXACTLY the deposit before you write anything; restate the running total and fix any mismatch first.
+6. **Multi-month sketch.** Lay out how the remaining monthly deposits build toward the revised targets.
+
+Operating principles:
+- **Research the current economy first.** Your training data is not current and the macro notes may be dated. Before sizing anything, USE THE WEB SEARCH TOOL to verify the present backdrop — major index levels and consensus / year-end targets, the rate and inflation picture, sector rotation, and any catalysts specific to these holdings. Base your near-term view on what you actually find, cite it, and never fabricate figures.
+- **Real allocation math.** Assign an actual dollar amount of the deposit to each holding. The amounts MUST sum to exactly the deposit size. Do not return percentages-only.
+
+**This is a capital DEPLOYMENT, not a rebalance.** Do NOT default to "fund the underweights, defer the overweights." A holding's distance from its target weight is background context, not the decision. Specifically: never give a name $0 or a token amount because it is "already at/above target" — neither the investor's stated target NOR a lower target you just calibrated for it — and never on the logic that "buying elsewhere will dilute its weight." Targets are a starting guess; when conviction or the macro read warrants, you may set a holding's end-state target ABOVE the investor's stated number and say so. The question to answer for each dollar is "what does it accomplish?", not "how far is this from target?"
+
+Fund SEVERAL objectives in the same deposit — a normal deposit does more than one of these at once, so don't collapse the whole thing onto a single axis (e.g. only the cheap underweights):
+- **Conviction / leadership.** Names the macro read or the investor's conviction notes lean into get funded meaningfully — they can take the largest tranche, staged into strength. Being overweight or extended above basis is NOT a reason to cut them to a token amount.
+- **Time-sensitive dips.** A holding below the investor's average cost / near lows, or a discount the macro read says won't last, gets front-loaded NOW. Lean a diversified-ETF dip freely; capture a single-name dip but cap the size.
+- **Legging in.** To "leg in" a position is to START it THIS deposit with a small tranche and continue over the following months — it is NOT $0 now and begin later. This is how you DCA into single names without one large entry.
+- **No-rush sleeves.** At/above basis, diversified, no catalyst, no conviction lean → THESE are the holdings to underfund or defer this month; future deposits fund them.
+
+- **Single-name risk is a binding constraint for a small/growing book.** Individual companies (not ETFs) carry idiosyncratic tail risk — right-size them and leg them in (start now, small) rather than one big entry. Diversified ETFs can be leaned without that risk.
+- **Multi-month build-out.** You are NOT cramming to target in one deposit — plan a sustained build over the horizon. But every deposit, including this one, should already be deploying across the objectives above, not parking capital for later.
+- If you dismiss or defer part of the portfolio this deposit, be concise about why.
+
+Output as markdown, in this order:
+1. **Near-term view** — a short paragraph grounding the macro backdrop in *current, web-searched* data (cite the index levels / consensus / rates you found), combined with the macro strategist's notes.
+2. **Target review** — the core section. A table covering every holding whose target you're changing (plus any you deliberately MAINTAIN for a reason worth stating): Holding | Current target | Verdict (Raise / Maintain / Reduce) | New target | Why (tie it to the research and how the thesis is performing). This — not balancing to the old targets — is what drives the deposit.
+3. **DCA opportunities** — a short list of holdings trading below the investor's cost or near lows that are worth buying at the lower price this deposit, each with the level / figure. If there are none, say so in a line.
+4. **Finalized model — this deposit (Month 1 of N)** — a table: Holding | This deposit $ | Weight after | Revised target | Logic this month. Order by dollar amount descending. The "This deposit $" column MUST sum to exactly the deposit; state the sum under the table.
+5. **Months 2–N build-out** — a bulleted cycle plan showing how the remaining monthly deposits build toward the revised targets (which positions get the next tranches, when single names complete, what's deferred). This is the months-cycle indicator.
+6. **Reasoning notes** — a few short paragraphs on the key trade-offs and where one signal overrode another.
+7. A one-line caveat that this is analysis to inform decisions, not personalized investment advice.
+
+Be specific — reference tickers and dollar amounts throughout.`;
 
       setInvestPrompt({ system: systemPrompt, user: userMessage });
 
+      // Slow, methodical reasoning. Opus 4.8 uses adaptive thinking; Sonnet 4.5
+      // (legacy) uses extended thinking with a token budget below max_tokens.
+      const thinking: Anthropic.Messages.ThinkingConfigParam =
+        model === "claude-sonnet-4-5"
+          ? { type: "enabled", budget_tokens: 6000 }
+          : { type: "adaptive" };
+
+      // Web search lets the analyst ground the near-term view in current economic
+      // data (index levels, consensus, rates, sector rotation) instead of stale
+      // training data — this is what makes "research the current economy" real.
+      // The 20260209 version filters results in-context for accuracy/efficiency.
+      const tools: Anthropic.Messages.ToolUnion[] = [
+        // Two research waves (macro, then per-holding catalysts) — give it room
+        // so it doesn't hit the cap mid-process like a 6-search budget does.
+        { type: "web_search_20260209", name: "web_search", max_uses: 10 },
+      ];
+
       let text = "";
+      let searchCount = 0;
+      setInvestActivity("Thinking through the deposit…");
       const stream = await client.messages.stream({
         model,
-        max_tokens: 8192,
+        max_tokens: 16000,
+        thinking,
+        tools,
         system: systemPrompt,
         messages: [{ role: "user", content: userMessage }],
       });
 
       for await (const chunk of stream) {
-        if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
+        // Surface what's happening during the silent gaps (thinking / web search)
+        // so the user can tell the run is alive rather than stuck.
+        if (chunk.type === "content_block_start") {
+          const block = chunk.content_block;
+          if (block.type === "thinking") {
+            setInvestActivity("Thinking through the deposit…");
+          } else if (block.type === "server_tool_use" && block.name === "web_search") {
+            searchCount += 1;
+            setInvestActivity(`Searching the web… (search ${searchCount})`);
+          } else if (block.type === "web_search_tool_result") {
+            setInvestActivity("Reading search results…");
+          } else if (block.type === "text") {
+            setInvestActivity("Writing the plan…");
+          }
+        } else if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
           text += chunk.delta.text;
-          // Strip the <optimizations> block while streaming so it doesn't appear in markdown
-          setInvestPlan(text.replace(/<optimizations>[\s\S]*?<\/optimizations>/g, "").trimEnd());
-        }
-      }
-
-      // ── Parse optimization structured output and compute new schedules ──
-      const optMatch = text.match(/<optimizations>([\s\S]*?)<\/optimizations>/);
-      if (optMatch && convergenceItems.length > 0) {
-        try {
-          const opts = JSON.parse(optMatch[1]!.trim()) as {
-            label: string;
-            summary: string;
-            adjustedTargets: Record<string, number>;
-          }[];
-          const results: OptimizationResult[] = opts.map(opt => {
-            // Apply adjusted targets — match by ticker first, then name
-            const adjustedItems = convergenceItems.map(item => {
-              const newPct =
-                opt.adjustedTargets[item.ticker] ??
-                opt.adjustedTargets[item.name] ??
-                opt.adjustedTargets[item.id];
-              return { ...item, targetPct: newPct !== undefined ? newPct : item.targetPct };
-            });
-            const { quarterlySnapshots, convergedQuarter } = computeConvergence(
-              adjustedItems, startValues, monthlyNum, investStrategy,
-            );
-            return {
-              label: opt.label,
-              summary: opt.summary,
-              adjustedItems,
-              quarterlySnapshots,
-              convergedQuarter,
-              originalConvergedQuarter,
-            };
-          });
-          setInvestOptimizations(results);
-        } catch {
-          // Malformed JSON from Claude — silently ignore
+          setInvestPlan(text);
         }
       }
     } catch (err) {
-      setInvestPlanError(err instanceof Error ? err.message : String(err));
+      setInvestPlanError(describeApiError(err));
     } finally {
+      setInvestActivity(null);
       setAnalyzingPlan(false);
     }
-  }
-
-  // ── "Council" — financial analyst then macro strategist ─────────────────────
-
-  async function handleCouncil() {
-    const apiKey = localStorage.getItem("anthropicApiKey");
-    if (!apiKey) return;
-
-    setCouncilPhase("analyst");
-    setAnalystOutput("");
-    setStrategistOutput("");
-    setSummaryOutput("");
-    setCouncilError(null);
-    setCouncilAnalystPrompt(undefined);
-    setCouncilStrategistPrompt(undefined);
-    setSummaryPrompt(undefined);
-
-    try {
-      const client = buildClient();
-      const holdingsTable = buildHoldingsTable();
-
-      // ── Phase 1: Financial Analyst ──────────────────────────────────────────
-
-      // Compute convergence math for the analyst
-      const totalTargetValue = newTotal; // post-deploy portfolio is the baseline
-      const totalShortfall = allRows.reduce((sum, r) => {
-        const targetPct = parseFloat(allocations[r.id] ?? "") || 0;
-        const targetAmt = totalTargetValue * (targetPct / 100);
-        const gap = Math.max(0, targetAmt - r.current_value);
-        return sum + gap;
-      }, 0);
-      const unstartedCount = allRows.filter(
-        (r) => r.current_value === 0 && (parseFloat(allocations[r.id] ?? "") || 0) > 0
-      ).length;
-      const monthsToConvergence = monthlyNum > 0 ? Math.ceil(totalShortfall / monthlyNum) : null;
-      const convergenceStr = monthsToConvergence != null
-        ? `~${monthsToConvergence} months (~${(monthsToConvergence / 12).toFixed(1)} years) at $${monthlyNum.toFixed(2)}/month`
-        : "unknown (no monthly contribution set)";
-      const yr1Total = monthlyNum * 12;
-      const yr2Total = monthlyNum * 24;
-      const yr3Total = monthlyNum * 36;
-
-      const analystSystem =
-        `You are a financial analyst specializing in capital deployment and portfolio construction. Your mandate is growth-first — but with a clear long-term destination: the investor wants full convergence on their target portfolio exposures. Every holding in the portfolio is intentional. The goal is to reach target weight across all positions over time, not just fund the top picks indefinitely.
-
-The tension you must navigate: growth positions come first in the near term, but the deployment plan must actively work toward getting every holding established. Do not leave positions at zero indefinitely. Prioritize ruthlessly in the short run, but build a credible path to full portfolio coverage over the contribution horizon.
-
-Work backward from the total expected contributions to determine when all holdings should effectively exist in the portfolio. Show your math: at the current contribution rate, when does the portfolio reach full coverage? Then reverse-engineer the quarterly ladder from that endpoint — which positions get initiated when, and in what sequence, to reach convergence on schedule without strangling the growth engines?
-
-Be specific. Name positions, dollar amounts, timing, and the reasoning behind sequencing decisions.`;
-
-      const analystUser =
-        `Here is the portfolio I need you to deploy capital into. Work backward from my available cash and ongoing monthly contributions to build a growth-first allocation strategy that converges on full target exposure over time.
-
-**Available to deploy today:** $${cashNum.toFixed(2)}
-**Monthly contribution:** $${monthlyNum.toFixed(2)}/month
-**Year 1 total contributions:** $${yr1Total.toFixed(2)}
-**Year 2 cumulative contributions:** $${yr2Total.toFixed(2)}
-**Year 3 cumulative contributions:** $${yr3Total.toFixed(2)}
-**Current portfolio value:** $${totalValue.toFixed(2)}
-**Post-deploy total:** $${newTotal.toFixed(2)}
-**Total shortfall to reach target weights:** $${totalShortfall.toFixed(2)}
-**Unstarted positions (currently $0):** ${unstartedCount}
-**Estimated time to full convergence at current contribution rate:** ${convergenceStr}
-
-| Holding | Asset Class | Current Value | Current % | Target % |
-|---------|-------------|---------------|-----------|----------|
-${holdingsTable}
-
-Your job: fund the growth engines first — but build a credible, sequenced path to full portfolio coverage. I want every intended holding established in the portfolio eventually; I do not want positions sitting at zero indefinitely. Work backwards from the convergence timeline to determine when each unstarted position gets initiated. Then allocate the $${cashNum.toFixed(2)} today and lay out how the $${monthlyNum.toFixed(2)}/month flows quarter by quarter to reach full coverage on schedule. Make clear what gets priority, when secondary positions get initiated, and why the sequencing is ordered the way it is.`;
-
-      setCouncilAnalystPrompt({ system: analystSystem, user: analystUser });
-
-      let analystText = "";
-      const analystStream = await client.messages.stream({
-        model,
-        max_tokens: 8192,
-        system: analystSystem,
-        messages: [{ role: "user", content: analystUser }],
-      });
-
-      for await (const chunk of analystStream) {
-        if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
-          analystText += chunk.delta.text;
-          setAnalystOutput(analystText);
-        }
-      }
-
-      // ── Phase 2: Macro Strategist ───────────────────────────────────────────
-
-      setCouncilPhase("strategist");
-
-      const strategistSystem =
-        `You are a macro strategist. A financial analyst has just reviewed the same portfolio and made capital deployment recommendations. Your job is not to re-do their work — it's to look at what they've recommended and tell the investor whether the deployment pattern agrees with, contradicts, or is neutral toward the macro thesis the portfolio is expressing.
-
-Read each cluster of positions on its own terms. Do the analyst's deployment priorities reinforce the portfolio's macro bets, or do they inadvertently starve a position that matters to the thesis? Are there positions being underfunded that represent a critical part of the macro view? Are there positions being overfunded relative to what the macro case actually warrants?
-
-Then map a route toward growth: given the thesis this portfolio represents, and given the analyst's deployment plan, where does the portfolio go from here? What does the 2-3 year path look like if the macro thesis plays out?
-
-Be direct. Agree where you agree, push back where the analyst's priorities don't serve the thesis, and call out anything the analyst missed that the macro view demands.`;
-
-      const strategistUser =
-        `Here is the portfolio context, followed by the financial analyst's deployment recommendation. Review the analyst's allocation and tell me whether it agrees or disagrees with the portfolio's macro thesis — then give me a route toward growth.
-
-**Portfolio value:** $${totalValue.toFixed(2)} | **Cash to deploy:** $${cashNum.toFixed(2)} | **Monthly:** $${monthlyNum.toFixed(2)}/month
-
-| Holding | Asset Class | Current Value | Current % | Target % |
-|---------|-------------|---------------|-----------|----------|
-${holdingsTable}
-
----
-
-**Financial Analyst's Recommendation:**
-
-${analystText}
-
----
-
-Now weigh in as the macro strategist. Does this deployment pattern serve or undermine the portfolio's macro thesis? What does the analyst get right? Where do you push back? Map the route toward growth from here.`;
-
-      setCouncilStrategistPrompt({ system: strategistSystem, user: strategistUser });
-
-      let strategistText = "";
-      const strategistStream = await client.messages.stream({
-        model,
-        max_tokens: 8192,
-        system: strategistSystem,
-        messages: [{ role: "user", content: strategistUser }],
-      });
-
-      for await (const chunk of strategistStream) {
-        if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
-          strategistText += chunk.delta.text;
-          setStrategistOutput(strategistText);
-        }
-      }
-
-      // ── Phase 3: Action Summary ─────────────────────────────────────────────
-
-      setCouncilPhase("summary");
-
-      // Build list of unstarted/planned holdings for precise trigger points
-      const unstartedList = allRows
-        .filter((r) => r.current_value === 0 && (parseFloat(allocations[r.id] ?? "") || 0) > 0)
-        .map((r) => {
-          const targetPct = parseFloat(allocations[r.id] ?? "") || 0;
-          const ticker = r.ticker ? ` (${r.ticker})` : "";
-          return `${r.name}${ticker} — target ${targetPct}%`;
-        })
-        .join("\n");
-
-      const summarySystem =
-        `You are a financial advisor giving a client their exact marching orders. Be ruthlessly concise. No jargon, no lengthy explanations, no hedging, no preamble.
-
-Two sections only — formatted exactly as shown. Nothing before Section 1. Nothing after Section 2.
-
-**Section 1 — Day 1**
-A bulleted list. Each bullet = one position to buy today, the exact dollar amount, and one sentence max on why. If cash is $0, say so and skip to Section 2.
-
-**Section 2 — Portfolio Milestones**
-A bulleted list. Each bullet = one unstarted holding (not yet owned), the precise total portfolio value at which to initiate it (a single dollar figure, not a range), and one sentence on why that trigger makes sense. Order by when they should be initiated (soonest first).
-
-No other content. No summaries, no conclusions, no "in summary", no sign-off.`;
-
-      const summaryUser =
-        `Here is the context from our analyst and strategist session. Distill it into marching orders.
-
-**Cash available today:** $${cashNum.toFixed(2)}
-**Current portfolio value:** $${totalValue.toFixed(2)}
-**Monthly contribution:** $${monthlyNum.toFixed(2)}/month
-
-**Unstarted holdings that need initiation milestones:**
-${unstartedList || "None"}
-
----
-
-ANALYST OUTPUT:
-${analystText}
-
----
-
-STRATEGIST OUTPUT:
-${strategistText}
-
----
-
-Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers for each unstarted holding). Nothing else.`;
-
-      setSummaryPrompt({ system: summarySystem, user: summaryUser });
-
-      let summaryText = "";
-      const summaryStream = await client.messages.stream({
-        model,
-        max_tokens: 4096,
-        system: summarySystem,
-        messages: [{ role: "user", content: summaryUser }],
-      });
-
-      for await (const chunk of summaryStream) {
-        if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
-          summaryText += chunk.delta.text;
-          setSummaryOutput(summaryText);
-        }
-      }
-    } catch (err) {
-      setCouncilError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setCouncilPhase(null);
-    }
-  }
-
-  function handleSaveCouncilPdf() {
-    const el = councilOutputRef.current;
-    if (!el) return;
-    const date = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-    const win = window.open("", "_blank");
-    if (!win) return;
-    win.document.write(`<!DOCTYPE html><html><head>
-      <title>Investment Council — ${date}</title>
-      <style>
-        * { box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 860px; margin: 40px auto; padding: 0 24px; color: #111; line-height: 1.65; font-size: 14px; }
-        h1 { font-size: 22px; margin: 0 0 4px; }
-        .meta { color: #6b7280; font-size: 13px; margin-bottom: 32px; }
-        h2 { font-size: 16px; font-weight: 600; margin: 28px 0 8px; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; }
-        h3 { font-size: 14px; font-weight: 600; margin: 20px 0 6px; }
-        p { margin: 0 0 12px; }
-        ul, ol { margin: 0 0 12px; padding-left: 20px; }
-        li { margin-bottom: 4px; }
-        table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
-        th { background: #f9fafb; border: 1px solid #e5e7eb; padding: 6px 10px; text-align: left; font-weight: 600; }
-        td { border: 1px solid #e5e7eb; padding: 6px 10px; }
-        strong { font-weight: 600; }
-        em { font-style: italic; }
-        code { font-family: monospace; background: #f3f4f6; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
-        hr { border: none; border-top: 1px solid #e5e7eb; margin: 24px 0; }
-        .section { margin-bottom: 40px; }
-        .section-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; margin-bottom: 12px; }
-        .summary-section { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px 24px; margin-bottom: 32px; }
-        .summary-section h2 { border-color: #86efac; }
-        @media print { body { margin: 20px; } }
-      </style>
-    </head><body>
-      <h1>Investment Council Report</h1>
-      <p class="meta">${date} · Portfolio $${totalValue.toFixed(2)} · Cash $${cashNum.toFixed(2)} · $${monthlyNum.toFixed(2)}/mo</p>
-      ${el.innerHTML}
-      <script>window.onload = function(){ window.print(); }</script>
-    </body></html>`);
-    win.document.close();
   }
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
     <div className="flex flex-col gap-6">
+
+      {/* ── Strategy intake (This or That) ── */}
+      <StrategyIntake holdings={holdings} totalValue={totalValue} />
 
       {/* ── Inputs ── */}
       <Card>
@@ -1487,6 +755,17 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
               value={monthlyContribution}
               onChange={(e) => setMonthlyContribution(e.target.value)}
               placeholder="0.00"
+            />
+            <Input
+              label="Build-out (months)"
+              type="number"
+              min="1"
+              max="24"
+              step="1"
+              value={buildoutMonths}
+              onChange={(e) => setBuildoutMonths(e.target.value)}
+              placeholder="3"
+              hint="Months to leg the deposit plan over"
             />
           </div>
         </CardContent>
@@ -1777,42 +1056,34 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
               {analyzingThesis ? "Analyzing…" : "Analyze"}
             </Button>
           </div>
+          {/* ── Optional price / DCA notes ── */}
+          <textarea
+            value={priceNotes}
+            onChange={e => setPriceNotes(e.target.value)}
+            placeholder="Optional — paste current prices or DCA notes (e.g. 'QQQM 246.08, VGIT at 52-wk lows'). Leave blank to let the analyst infer DCA opportunities from your cost basis."
+            rows={2}
+            className="w-full resize-y rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 py-2 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-subtle)] focus:border-[var(--color-primary)] focus:outline-none"
+          />
+
           <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
               onClick={handleInvestPlan}
-              disabled={analyzingPlan || !allocationOk || allRows.length === 0}
+              disabled={analyzingPlan || allRows.length === 0 || !(cashNum > 0) || !thesis.trim()}
+              title={!thesis.trim()
+                ? "Run Analyze first — the deposit plan needs the macro read to size against"
+                : "The analyst sizes this deposit across your holdings using the macro read, DCA signals, and your monthly cadence"}
             >
-              <Wallet size={14} />
+              <TrendingUp size={14} />
               {analyzingPlan ? "Planning…" : "Invest with Claude"}
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={handleCouncil}
-              disabled={councilPhase !== null || allRows.length === 0}
-              title="Financial Analyst allocates capital, then Macro Strategist weighs in on the thesis"
-            >
-              <Users size={14} />
-              {councilPhase === "analyst" ? "Analyst thinking…" : councilPhase === "strategist" ? "Strategist weighing in…" : councilPhase === "summary" ? "Summarizing…" : "Council"}
-            </Button>
-            <div className="flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-border)] p-0.5">
-              {([
-                { value: "balance",   label: "Balance",   title: "Split contributions by target weight each month — simple and consistent" },
-                { value: "rebalance", label: "Rebalance", title: "Gap-weighted fill: underweight positions receive proportionally more each month" },
-                { value: "growth",   label: "Growth",    title: "Return-weighted contributions; floor protection for significantly underweight positions; quarterly convergence forced" },
-              ] as { value: "balance" | "rebalance" | "growth"; label: string; title: string }[]).map(s => (
-                <button key={s.value} onClick={() => setInvestStrategy(s.value)} title={s.title}
-                  className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${investStrategy === s.value ? "bg-[var(--color-primary)] text-white" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}>
-                  {s.label}
-                </button>
-              ))}
-            </div>
-            {!allocationOk && allocationSum > 0 && (
-              <span className="text-xs text-[var(--color-text-muted)]">
-                Allocations must sum to 100% for Invest
-              </span>
-            )}
+            <span className="text-xs text-[var(--color-text-muted)]">
+              {!thesis.trim()
+                ? <span className="text-[var(--color-warning)]">Run Analyze first to attach a macro read</span>
+                : cashNum > 0
+                  ? `Allocates this $${cashNum.toLocaleString()} deposit · Month 1 of ${Math.max(1, Math.round(parseFloat(buildoutMonths) || 1))} · thinks + web-researches current markets (slower)`
+                  : "Enter a cash amount above to plan a deposit"}
+            </span>
 
             {/* Model toggle */}
             <div className="ml-auto flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-border)] p-0.5">
@@ -1833,214 +1104,6 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
             </div>
           </div>
 
-          {/* ── Deploy Capital ── */}
-          <Card>
-            <CardHeader>
-              <div className="flex items-center gap-2">
-                <Zap size={14} className="text-[var(--color-primary)]" />
-                <CardTitle>Deploy Capital</CardTitle>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap items-end gap-3 mb-4">
-                <div>
-                  <p className="text-xs text-[var(--color-text-muted)] mb-1">Amount to deploy</p>
-                  <input
-                    type="number"
-                    min="0"
-                    step="100"
-                    value={deployAmount}
-                    onChange={e => { setDeployAmount(e.target.value); setDeployResult(null); setDeployCalibration({}); }}
-                    placeholder="e.g. 5000"
-                    className="w-32 rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2 py-1.5 text-sm tabular-nums focus:border-[var(--color-primary)] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <p className="text-xs text-[var(--color-text-muted)] mb-1">Strategy</p>
-                  <div className="flex gap-1 rounded-[var(--radius-sm)] border border-[var(--color-border)] p-0.5">
-                    {([
-                      { value: "balance",   label: "Balance",   title: "Split by target weight — proportional regardless of current position" },
-                      { value: "rebalance", label: "Rebalance", title: "Gap-weighted fill — underweight positions receive proportionally more" },
-                      { value: "growth",    label: "Growth",    title: "Return-weighted by asset class with floor protection for significantly underweight positions" },
-                    ] as { value: "balance" | "rebalance" | "growth"; label: string; title: string }[]).map(s => (
-                      <button key={s.value} onClick={() => { setDeployStrategy(s.value); setDeployResult(null); setDeployCalibration({}); }} title={s.title}
-                        className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${deployStrategy === s.value ? "bg-[var(--color-primary)] text-white" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}>
-                        {s.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={!(parseFloat(deployAmount) > 0) || allRows.length === 0 || !allocationOk}
-                  onClick={() => {
-                    const cash = parseFloat(deployAmount) || 0;
-                    if (cash <= 0) return;
-                    setDeployCalibration({});
-                    setDeployResult(computeDeployment(cash, deployStrategy));
-                  }}
-                >
-                  <Zap size={14} />
-                  Plan
-                </Button>
-              </div>
-
-
-              {deployResult && deployResult.length > 0 && (() => {
-                const cash = parseFloat(deployAmount) || 0;
-                const newTotal = effectiveTotalValue + cash;
-                const totalDeployed = deployResult.reduce((s, r) => s + r.allocation, 0);
-                const isCalibrated = Object.keys(deployCalibration).length > 0;
-                const tagColors: Record<string, string> = {
-                  "target-split":    "text-[var(--color-primary)]",
-                  "gap-fill":        "text-[var(--color-success,#22c55e)]",
-                  "return-weighted": "text-amber-500",
-                  "floor":           "text-blue-400",
-                  "skipped":         "text-[var(--color-text-subtle)]",
-                };
-                const tagLabels: Record<string, string> = {
-                  "target-split":    "target split",
-                  "gap-fill":        "gap fill",
-                  "return-weighted": "return-weighted",
-                  "floor":           "floor",
-                  "skipped":         "at weight",
-                };
-
-                // Threshold check: small contribution warning
-                const activePositions = deployResult.filter(r => r.allocation > 0);
-                const avgPerPosition = activePositions.length > 0 ? cash / activePositions.length : cash;
-                const isThinSpread = cash < SINGLE_DUMP_THRESHOLD || avgPerPosition < MIN_PER_POSITION;
-                const topTarget = deployResult.reduce<DeployAllocation | null>(
-                  (best, r) => (r.allocation > (best?.allocation ?? -1) ? r : best), null
-                );
-
-                return (
-                  <div className="flex flex-col gap-3">
-                    {isThinSpread && (
-                      <div className="flex items-start gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
-                        <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-                        <span>
-                          <span className="font-medium">Small contribution</span> — ${cash.toFixed(0)} across {activePositions.length} position{activePositions.length !== 1 ? "s" : ""} averages ${avgPerPosition.toFixed(0)}/position.
-                          {topTarget && (
-                            <> Consider a single dump into <span className="font-medium">{topTarget.ticker || topTarget.name}</span> instead of splitting thin.</>
-                          )}
-                        </span>
-                      </div>
-                    )}
-                    <div>
-                      <p className="text-xs text-[var(--color-text-muted)] mb-1">Macro notes <span className="text-[var(--color-text-subtle)]">(paste from Analyze with Claude)</span></p>
-                      <textarea
-                        value={deployNotes}
-                        onChange={e => setDeployNotes(e.target.value)}
-                        placeholder="Paste headline analysis here to inform calibration…"
-                        rows={3}
-                        className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2 py-1.5 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-subtle)] focus:border-[var(--color-primary)] focus:outline-none resize-none"
-                      />
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={calibratingDeploy}
-                        onClick={() => handleDeployCalibrate(deployResult, cash)}
-                      >
-                        <Bot size={14} />
-                        {calibratingDeploy ? "Calibrating…" : isCalibrated ? "Recalibrate with Claude" : "Calibrate with Claude"}
-                      </Button>
-                      {isCalibrated && (
-                        <p className="text-xs text-[var(--color-primary)]">Claude-calibrated · <span className="text-[var(--color-text-muted)]">blue = suggested allocation</span></p>
-                      )}
-                      {deployCalibrationError && (
-                        <p className="text-xs text-[var(--color-danger)]">{deployCalibrationError}</p>
-                      )}
-                    </div>
-
-
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-xs border-collapse">
-                        <thead>
-                          <tr className="border-b border-[var(--color-border)]">
-                            <th className="text-left py-1.5 text-[var(--color-text-muted)] font-medium">Holding</th>
-                            <th className="text-right py-1.5 pr-3 text-[var(--color-text-muted)] font-medium">Current</th>
-                            <th className="text-right py-1.5 pr-3 text-[var(--color-text-muted)] font-medium">Target</th>
-                            <th className="text-right py-1.5 pr-3 text-[var(--color-text-muted)] font-medium">Deploy $</th>
-                            {isCalibrated && <th className="text-right py-1.5 pr-3 text-[var(--color-primary)] font-medium">Claude $</th>}
-                            <th className="text-right py-1.5 pr-3 text-[var(--color-text-muted)] font-medium">After</th>
-                            <th className="text-left py-1.5 text-[var(--color-text-muted)] font-medium">Method</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {deployResult.map(r => {
-                            const cal = deployCalibration[r.id];
-                            const claudeAlloc = cal ? cash * cal.suggestedShare : null;
-                            const claudeNewPct = claudeAlloc != null ? ((r.currentValue + claudeAlloc) / newTotal) * 100 : null;
-                            const isPlannedRow = allRows.find((ar) => ar.id === r.id)?.isPlanned ?? false;
-                            const sharePrice = isPlannedRow && r.ticker ? tickerPrices[r.ticker] : undefined;
-                            return (
-                              <React.Fragment key={r.id}>
-                                <tr className="border-b border-[var(--color-border)]/40 hover:bg-[var(--color-surface-raised)]/30">
-                                  <td className="py-2 pr-3">
-                                    <p className="font-medium text-[var(--color-text)]">{r.name}</p>
-                                    {r.ticker && <p className="font-mono text-[10px] text-[var(--color-text-muted)]">{r.ticker}</p>}
-                                    {sharePrice != null && (
-                                      <p className="text-[10px] text-[var(--color-text-subtle)] tabular-nums">@ ${sharePrice.toFixed(2)}</p>
-                                    )}
-                                  </td>
-                                  <td className="text-right py-2 pr-3 tabular-nums text-[var(--color-text-muted)]">{r.currentPct.toFixed(1)}%</td>
-                                  <td className="text-right py-2 pr-3 tabular-nums text-[var(--color-text-muted)]">{r.targetPct.toFixed(1)}%</td>
-                                  <td className="text-right py-2 pr-3 tabular-nums font-semibold text-[var(--color-text)]">
-                                    {r.allocation >= 1 ? `$${r.allocation.toFixed(0)}` : "—"}
-                                  </td>
-                                  {isCalibrated && (
-                                    <td className="text-right py-2 pr-3 tabular-nums font-semibold text-[var(--color-primary)]">
-                                      {claudeAlloc != null && claudeAlloc >= 1 ? `$${claudeAlloc.toFixed(0)}` : "—"}
-                                    </td>
-                                  )}
-                                  <td className={`text-right py-2 pr-3 tabular-nums font-medium ${Math.abs((claudeNewPct ?? r.newPct) - r.targetPct) < 1.5 ? "text-[var(--color-success,#22c55e)]" : (claudeNewPct ?? r.newPct) > r.targetPct ? "text-amber-500" : "text-[var(--color-text)]"}`}>
-                                    {(claudeNewPct ?? r.newPct).toFixed(1)}%
-                                  </td>
-                                  <td className={`py-2 text-[10px] font-medium ${tagColors[r.tag] ?? ""}`}>
-                                    {tagLabels[r.tag] ?? r.tag}
-                                  </td>
-                                </tr>
-                                {cal?.rationale && (
-                                  <tr className="border-b border-[var(--color-border)]/20 bg-[var(--color-primary)]/5">
-                                    <td colSpan={isCalibrated ? 7 : 6} className="py-1.5 px-3 text-[11px] text-[var(--color-primary)]/80 italic">
-                                      {cal.rationale}
-                                    </td>
-                                  </tr>
-                                )}
-                              </React.Fragment>
-                            );
-                          })}
-                        </tbody>
-                        <tfoot>
-                          <tr className="border-t border-[var(--color-border)] bg-[var(--color-surface-raised)]/50">
-                            <td colSpan={3} className="py-2 text-xs font-medium text-[var(--color-text-muted)]">Total deployed</td>
-                            <td className="text-right py-2 pr-3 tabular-nums font-semibold text-[var(--color-text)]">${totalDeployed.toFixed(0)}</td>
-                            {isCalibrated && (
-                              <td className="text-right py-2 pr-3 tabular-nums font-semibold text-[var(--color-primary)]">
-                                ${(Object.values(deployCalibration).reduce((s, c) => s + c.suggestedShare, 0) * cash).toFixed(0)}
-                              </td>
-                            )}
-                            <td className="text-right py-2 pr-3 tabular-nums text-[var(--color-text-muted)]">{((newTotal / effectiveTotalValue - 1) * 100).toFixed(1)}% growth</td>
-                            <td />
-                          </tr>
-                        </tfoot>
-                      </table>
-                    </div>
-                    <p className="text-[10px] text-[var(--color-text-subtle)]">✓ within 1.5% of target · Deploy $ = strategy math · Claude $ = calibrated suggestion</p>
-                  </div>
-                );
-              })()}
-
-              {!(parseFloat(deployAmount) > 0) && (
-                <p className="text-xs text-[var(--color-text-subtle)]">Enter an amount and click Plan to see a strategy-driven allocation breakdown.</p>
-              )}
-            </CardContent>
-          </Card>
-
           <StreamingCard
             icon={<TrendingUp size={14} className="text-[var(--color-primary)]" />}
             title={thesisNews ? `Macro Read — "${thesisNews}"` : "Portfolio Thesis"}
@@ -2052,154 +1115,16 @@ Give me Section 1 (Day 1 buys) and Section 2 (precise portfolio value triggers f
           />
 
           <StreamingCard
-            icon={<Wallet size={14} className="text-[var(--color-primary)]" />}
-            title="Investment Plan"
+            icon={<TrendingUp size={14} className="text-[var(--color-success)]" />}
+            title={`Investment Plan — Month 1 of ${Math.max(1, Math.round(parseFloat(buildoutMonths) || 1))}`}
             content={investPlan}
             streaming={analyzingPlan}
             error={investPlanError}
             endRef={investPlanEndRef}
             promptPayload={investPrompt}
+            status={investActivity}
           />
 
-          {/* ── Computed optimization schedules ── */}
-          {investOptimizations.length > 0 && (
-            <div className="flex flex-col gap-3">
-              {investOptimizations.map((opt, idx) => {
-                const colHeaders = opt.adjustedItems.map(h => h.ticker || h.name.split(" ")[0]);
-                const convergeNote = opt.convergedQuarter
-                  ? `Converges at Q${opt.convergedQuarter} (~${(opt.convergedQuarter / 4).toFixed(1)} yrs)`
-                  : `Does not fully converge within ${opt.quarterlySnapshots.length} quarters`;
-                const originalNote = opt.originalConvergedQuarter
-                  ? ` · original Q${opt.originalConvergedQuarter}`
-                  : "";
-                return (
-                  <Card key={idx}>
-                    <CardHeader>
-                      <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <p className="text-xs font-semibold text-[var(--color-primary)] uppercase tracking-wide mb-0.5">
-                            Optimization {idx + 1}
-                          </p>
-                          <CardTitle>{opt.label}</CardTitle>
-                        </div>
-                        <span className="shrink-0 rounded text-xs px-2 py-1 bg-[var(--color-surface-raised)] border border-[var(--color-border)] text-[var(--color-text-muted)] whitespace-nowrap">
-                          {convergeNote}{originalNote}
-                        </span>
-                      </div>
-                      <p className="text-sm text-[var(--color-text-muted)] mt-1">{opt.summary}</p>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs border-collapse">
-                          <thead>
-                            <tr className="border-b border-[var(--color-border)]">
-                              <th className="text-left py-1.5 pr-3 text-[var(--color-text-muted)] font-medium">Qtr</th>
-                              <th className="text-right py-1.5 pr-3 text-[var(--color-text-muted)] font-medium">Portfolio</th>
-                              {colHeaders.map((h, i) => (
-                                <th key={i} className="text-right py-1.5 pr-3 text-[var(--color-text-muted)] font-medium">{h}</th>
-                              ))}
-                            </tr>
-                            <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface-raised)]/50">
-                              <td className="py-1.5 pr-3 font-semibold text-[var(--color-text-muted)]">Target</td>
-                              <td className="text-right py-1.5 pr-3 text-[var(--color-text-muted)]">—</td>
-                              {opt.adjustedItems.map((item, i) => (
-                                <td key={i} className="text-right py-1.5 pr-3 font-semibold text-[var(--color-text)]">
-                                  {item.targetPct.toFixed(1)}%
-                                </td>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {opt.quarterlySnapshots.map(snap => (
-                              <tr key={snap.quarter} className="border-b border-[var(--color-border)]/40 hover:bg-[var(--color-surface-raised)]/30">
-                                <td className="py-1.5 pr-3 text-[var(--color-text-muted)]">Q{snap.quarter}</td>
-                                <td className="text-right py-1.5 pr-3 text-[var(--color-text)]">${(snap.totalValue / 1000).toFixed(1)}K</td>
-                                {snap.weights.map((w, i) => {
-                                  const target = opt.adjustedItems[i]?.targetPct ?? 0;
-                                  const delta = w - target;
-                                  const converged = Math.abs(delta) < 1.5;
-                                  return (
-                                    <td key={i} className={`text-right py-1.5 pr-3 ${converged ? "text-[var(--color-success,#22c55e)]" : delta > 0 ? "text-amber-500" : "text-[var(--color-text-muted)]"}`}>
-                                      {w.toFixed(1)}%{converged ? " ✓" : delta > 0 ? " ▲" : " ▼"}
-                                    </td>
-                                  );
-                                })}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                      <p className="mt-2 text-[10px] text-[var(--color-text-muted)]">✓ within 1.5% of target · ▲ overweight · ▼ underweight</p>
-                    </CardContent>
-                  </Card>
-                );
-              })}
-            </div>
-          )}
-
-          {/* ── Council output ── */}
-          {councilError && (
-            <div className="rounded-[var(--radius-sm)] bg-[var(--color-danger)]/10 px-4 py-3 text-sm text-[var(--color-danger)]">
-              {councilError}
-            </div>
-          )}
-          {(analystOutput || strategistOutput || summaryOutput) && (
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-medium text-[var(--color-text-muted)]">Council Session</p>
-              {summaryOutput && councilPhase === null && (
-                <button
-                  onClick={handleSaveCouncilPdf}
-                  className="flex items-center gap-1.5 text-xs text-[var(--color-primary)] hover:underline"
-                >
-                  <Download size={12} />
-                  Save as PDF
-                </button>
-              )}
-            </div>
-          )}
-          <div ref={councilOutputRef} className="flex flex-col gap-4">
-            {(analystOutput || councilPhase === "analyst") && (
-              <div className="relative">
-                <div className="absolute -left-0.5 top-0 bottom-0 w-0.5 rounded-full bg-[var(--color-warning)]/40" />
-                <StreamingCard
-                  icon={<BarChart3 size={14} className="text-[var(--color-warning)]" />}
-                  title="Financial Analyst — Capital Deployment"
-                  content={analystOutput}
-                  streaming={councilPhase === "analyst"}
-                  error={null}
-                  endRef={analystEndRef}
-                  promptPayload={councilAnalystPrompt}
-                />
-              </div>
-            )}
-            {(strategistOutput || councilPhase === "strategist") && (
-              <div className="relative">
-                <div className="absolute -left-0.5 top-0 bottom-0 w-0.5 rounded-full bg-[var(--color-primary)]/40" />
-                <StreamingCard
-                  icon={<Globe2 size={14} className="text-[var(--color-primary)]" />}
-                  title="Macro Strategist — Thesis Alignment & Growth Route"
-                  content={strategistOutput}
-                  streaming={councilPhase === "strategist"}
-                  error={null}
-                  endRef={strategistEndRef}
-                  promptPayload={councilStrategistPrompt}
-                />
-              </div>
-            )}
-            {(summaryOutput || councilPhase === "summary") && (
-              <div className="rounded-[var(--radius-sm)] border border-[var(--color-success)]/30 bg-[var(--color-success)]/5">
-                <StreamingCard
-                  icon={<Zap size={14} className="text-[var(--color-success)]" />}
-                  title="Action Summary"
-                  content={summaryOutput}
-                  streaming={councilPhase === "summary"}
-                  error={null}
-                  endRef={summaryEndRef}
-                  promptPayload={summaryPrompt}
-                />
-              </div>
-            )}
-          </div>
         </div>
       )}
     </div>

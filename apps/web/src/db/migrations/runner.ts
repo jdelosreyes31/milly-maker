@@ -23,6 +23,7 @@ import schema021 from "./021_purge_sold_holdings.sql?raw";
 import schema022 from "./022_reset_brokerage.sql?raw";
 import schema023 from "./023_lot_transaction_type.sql?raw";
 import schema024 from "./024_fix_broken_sells.sql?raw";
+import schema025 from "./025_remove_dividend_contributions.sql?raw";
 
 const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "001_initial_schema", sql: schema001 },
@@ -49,6 +50,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "022_reset_brokerage", sql: schema022 },
   { name: "023_lot_transaction_type", sql: schema023 },
   { name: "024_fix_broken_sells", sql: schema024 },
+  { name: "025_remove_dividend_contributions", sql: schema025 },
 ];
 
 export async function runMigrations(conn: AsyncDuckDBConnection): Promise<void> {
